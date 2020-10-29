@@ -1,0 +1,257 @@
+<html>
+
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=windows-1252">
+<title>msync -- wrapper for rsync that</title>
+</head>
+<style>
+body {Background-color: #FFFFFF link: #0000CC vlink: #660066} 
+h1  { font-family: arial; text-align: Center; color: #CC0000 }
+h2  { font-family: arial; text-align: Center; color: #0000CC }
+h3  { font-family: arial; text-align: Center }
+h4  { font-family: Arial;  color: #006400}
+h5  { font-family: Arial;  color: #333300; font-style: italic}
+h6  { font-family: Arial; font-size: 10pt; font-style: bold}
+em  { font-style: italic; font-weight: bold; color: #FF0000}
+cite { font-style: italic; font-weight: bold; color: blue }
+a  {color: #0000FF;}
+
+td {font-family:arial,helvetica,sans-serif; font-size:10pt;}
+
+p.petit { font-family: arial; font-size: smaller }
+table.swb    {Background-color: cyan}
+td.swb       { border-right-style: solid; border-bottom-style: solid }
+table.nb    {Background-color: #ffffcc}
+tr.nb       { text-align: Center; font-weight: bold }
+td.nb        { border-style: solid }
+kbd {font-family: Fixedsys; font-size: 12pt; color: #0000FF;}
+tt {font-family: Fixedsys; font-size: 12pt; color: #0000FF;}
+code {font-family: Fixedsys; font-size: 12pt; color: #0000FF;}
+pre {font-family: Fixedsys; color: #0000FF; font-size: 12pt; margin: 1em 40px; }
+pre.code {font-family: Fixedsys; color: #0000FF; margin: 1em 40px;}
+blockquote {font-size: 10pt; font-family: arial; background: #F9F9F9}
+</style>
+<body>
+
+<pre>
+<h1>msync -- wrapper for rsync that allow multistream transfer of a number of large files or directory tree over high latency WAN</h1>
+
+
+
+<h3>Can be used for transferring files to Amazon and AWS<h3>
+
+<p> Nikolai Bezroukov, 2018-2020. Licensed under Artistic license
+
+
+
+<h3> ALGORITHM
+
+</h3>
+
+<p>    msync organizes files into given number of "piles" and transfers all piles in parallel    using for each separate invocation of rsync or tar pipe to the target server.
+
+<p>    If program is terminated before full transfer took place, on next execution partial transfers are completed using rsync.
+
+<p>    Each time it will start from the point it was terminated operating like rsync but for the whole directory tree or file list.
+
+<p>    It scans the content of the remote size and transmit only those files what not yet transmitted.
+
+
+
+<p>         The script tried to verify whether files were already transferred and if missing files are detected it transfers only missing files
+
+(partially transferred files transferred using rsync)
+
+
+
+<h3> PERFORMANCE  
+
+
+
+</h3>
+
+
+
+<p>    With latency 100 msec and 8 threads transfer rate varies between 50 and 100 MB/sec. 
+
+
+
+<h3> INVOCATION
+
+
+
+</h3>
+
+
+
+<p>   <em>ATTENTION</em>: both parameters are obligatory and can't be omitted unless they are specified in config file
+
+
+
+<p>   Like may copy utilities, this utility has two parameters (source dir and traget dir). Both are obligatory and can't be omitted unless they are specified in config file
+
+
+
+<ul>
+
+   <li><b>1st (BASE_DIRECTORY)</b>    -- the name of BASE directory. If option -f is given abs path for all entries in the list that do not stat with '/'&nbsp;                             will be prefixed this value (see below).                             If option -f is not given the utility transfers all files in this tree; otherwise only subset specified in option -f
+
+   </li>
+
+   <li><b>2nd&nbsp; (TARGET_DIRECTORY)</b> -- name of the target directory on target server where files need to be copied to. </li>
+   </ul>
+
+
+
+<p> There are two ways to invoke this utility:
+
+
+
+<p> 1. By specifying absolute path to BASE directory on the source and target. All files in this directory will be transferred
+
+
+
+   <pre class="code">msync BASE_DIRECTORY_SOURCE BASE_DIRECTORY_ON_TARGET </pre>
+
+   <p>For example:
+
+</p>
+
+   <pre class="code">msync -u backup -t 10.1.1.1 /doolittle/Projects/Critical/Genome033/ /gpfs/backup/data/bioinformatics/Critical/Genome033 </pre>
+
+   <p>2. Specifying selected list of files and directories either with abs path or relative to BASE directory. Only they will be transferred.
+
+   </p>
+
+<p>    This is subset should be stored one entry per line in the file provided in option -f. 
+
+<p>    For example:
+
+   <pre class="code">msync -t 10.1.1.1 -f critical.lst /doolittle/Projects/Critical/Genome033/ /gpfs/backup/data/bioinformatics/Critical/Genome033 </pre>
+
+
+
+<p> NOTE:
+
+<p>    if invoked with three parameters the third parameter is interpreted as the the common tail and added to BASE_DIRECTORY_SOURCE and BASE_DIRECTORY_ON_TARGET
+
+   <pre class="code">msync BASE_DIRECTORY TARGET_DIRECTORY SUBDIRECTORY </pre>
+
+   <p>That means that the previous example can be rewritten as
+
+</p>
+
+   <pre class="code">msync -u backup -t 10.1.1.1 -f critical.lst /doolittle/Projects /gpfs/nobackup/data/bioinformatics Critical/Genome033 </pre>
+
+   <p>&nbsp;</p>
+
+
+
+<h3> OPTIONS
+
+
+
+</h3>
+
+
+
+<p>   -c -- <b>absolute or relative path to the configuration file</b>. Default is the first in the following list:<tt> ~/.config/msync.conf</tt>, 
+<tt>/etc/msync.conf</tt>
+
+<p>   -f -- <b>filelist</b>. Either absolute pathname should be specified, or the file should be in BASE directory.&nbsp;         Each line can specify either a file with path or a directory (in the latter case all files in this subtree will be transferred).
+
+Files with relative path are considered to based on the BASE DIRECTORY (the first parameter of the invocation) to the target. 
+
+
+
+<p>   -h -- help
+
+<p>   -g -- <b>egrep regular expression for selecting files and directories</b> (only in tree copy mode)
+
+<p>   -l -- <b>directory for log files </b>(the default is <tt>/tmp/Msync_</tt><font color="#0000FF"><i><b>&lt;userid&gt;</b></i></font> )
+
+<p>   -m -- <b>max amount to be transferred</b> (useful for weekend transfers). Can be specified in T,G,M or K. For example -m 4T
+
+<p>   -p --&nbsp; (<b>level of parallelism</b>) number of parallel streams (default is 4);
+
+<p>   -r -- RUN AT specified time. If this option is specified it is used in at command which is issues from the utility and 
+eventually will launches all threads.         For example as  -r now.&nbsp;         By default launch file are generated but are not 
+launched. The command for launching&nbsp; them(<tt>launcher</tt>) also is generated and listed in the protocol.         You can schedule the msync utility via cron can be invoked at 7PM each day and kill all threats is they exist at 6 AM.         The next day it will restart from the point at which it was interrupted. Sometimes rsync leave 
+partial files without renaming them so it is better to use limit of tranfered file (see option -m above)<p>         This is an open problem
+
+   <ul>
+
+      <li>-S -- list of ssh parameters which is passed to SSH "as is"  (for example  -S '-i /home/bezroun/.ssh/id_rsa.tt -P 222';
+      </li>
+
+      <li>-t -- target site IP or DNS name
+
+
+
+</li>
+
+      <li>-u -- user name on target site if different from the USER env variable.         (should be configured with the passwordless $SSH login from the source site)
+
+
+
+      </li>
+
+      <li>-v -- verbosity (0-3). 0 -- no messages; 1- only serious; 2 - serious and errors; 3 -serious, errors and warnings;
+
+</li>
+
+      <li>-x -- attemtp to recover partial file with rsync extentions </li>
+
+      <li>-h -- help
+
+
+
+</li>
+
+      <li>-d -- debug flag (0 -production mode; 1-3 -various debugging modes with additional debugging output). Ff debug is greater then zero, the source is saved in archive ~/Archive, if it was changed form the prev run.
+      </li>
+      </ul>
+
+
+
+<h3> NOTES
+
+
+
+</h3>
+      <ol>
+
+         <li>Acceleration depends on the number of processes that will be launched in parallel.&nbsp;        While default is 4, the number up to 8 usually work faster on links with latency 100 msec.
+
+         Further increase to 16 leads to eventual saturation. You need to experiment to find
+
+         the optimal number for your situation. For some reason on large files rsync works better than tar, even if they do not 
+         exist of the target. </li>
+
+         <li>default GIT directory is $HOME/Archive. It is used only during debugging. This directory should be different from 
+         &quot;running directory, from which script is launched </li>
+
+         <li>Split option is not implemented.  Currently it can't split huge files and reassemble then automatically on the target server.
+         </li>
+
+         <li>In the future versions option b specified chunk size might be implemented. Right now I do not feel that it is necessary 
+         although I did incounted that some ;arge files need to be split for storage.&nbsp; One advantage of option -b would be that 
+         that&nbsp; number of threads equal 8 and the file we need to transfer is 40TB will be split into 8 chunks. </li>
+         </ol>
+
+         <pre class="code"> split --bytes 5T --numeric-suffixes --suffix-length=3 foo /tmp/foo. </pre>
+         <blockquote>
+
+            <p>The split commands generate chunks named: foo.000, foo.001 ...
+
+</p>
+
+            <p>For re-assembling you need to sort chunks first
+
+            <pre class="code">cd $TARGET &amp;&amp; cat `ls foo.* | sort` &gt; foo </pre>
+         </blockquote>
+</pre>
+
+</body>
+
+</html>
