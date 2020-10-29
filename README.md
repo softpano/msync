@@ -1,4 +1,4 @@
-##msync -- wrapper for rsync that allow multistream transfer of a number of large files or directory tree over high latency WAN
+## msync -- wrapper for rsync that allow multistream transfer of a number of large files or directory tree over high latency WAN
 
 Can be used for transferring files to Amazon and AWS
 
