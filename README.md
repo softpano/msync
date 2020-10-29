@@ -1,6 +1,6 @@
-## msync -- wrapper for rsync that allow multistream transfer of a number of large files or directory tree over high latency WAN
+## msync -- wrapper for rsync that allows multistream transfer of a number of large files or directory tree over high latency WAN
 
-Can be used for transferring files to Amazon and AWS
+Can be used for transferring ;arge file such as genomes files to/from AWS
 
 Nikolai Bezroukov, 2018-2020. Licensed under Artistic license 
 
