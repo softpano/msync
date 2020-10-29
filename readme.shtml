@@ -2,7 +2,7 @@
 
 <head>
 <meta http-equiv="Content-Type" content="text/html; charset=windows-1252">
-<title>msync -- wrapper for rsync that</title>
+<title>msync -- wrapper for rsync that allows multistream transfer</title>
 </head>
 <style>
 body {Background-color: #FFFFFF link: #0000CC vlink: #660066} 
@@ -33,46 +33,43 @@ blockquote {font-size: 10pt; font-family: arial; background: #F9F9F9}
 </style>
 <body>
 
-<pre>
-<h1>msync -- wrapper for rsync that allow multistream transfer of a number of large files or directory tree over high latency WAN</h1>
+<h1>msync -- wrapper for rsync that allows multistream transfer of a number of large files or directory tree over high latency WAN</h1>
 
 
 
 <h3>Can be used for transferring files to Amazon and AWS<h3>
 
-<p> Nikolai Bezroukov, 2018-2020. Licensed under Artistic license
+<p> <b>Nikolai Bezroukov, 2018-2020. Licensed under Artistic license
 
 
 
-<h3> ALGORITHM
-
-</h3>
-
-<p>    msync organizes files into given number of "piles" and transfers all piles in parallel    using for each separate invocation of rsync or tar pipe to the target server.
-
-<p>    If program is terminated before full transfer took place, on next execution partial transfers are completed using rsync.
-
-<p>    Each time it will start from the point it was terminated operating like rsync but for the whole directory tree or file list.
-
-<p>    It scans the content of the remote size and transmit only those files what not yet transmitted.
+</b>
 
 
 
-<p>         The script tried to verify whether files were already transferred and if missing files are detected it transfers only missing files
+<h3> Abstract</h3>
 
-(partially transferred files transferred using rsync)
+<p>    <tt>msync</tt> organizes files into given number of "piles" and transfers all piles in parallel    using for each separate invocation of rsync or tar pipe to the target server.
+
+<p>    Can be used for transferring large file such as genomes files to/from AWS. Number of parallel processed launched is specified 
+via option -p (the default is 4). <br>
+If is recommended to split files over 5TB in chunks for transfer but currently this needs to be done manually.
+
+<p>    It detects and automatically restarts the transmission of partially transferred files (the capability of rsync that few knows 
+and which is badly documented): it transfers processes are terminated before full transfer took place (for example the target server 
+rebooted), on next execution it tires to complete partial transfers.
+
+<p>    If not all files were transferred on the next invocation is calculated the differences and acts accordingly until all files 
+or directory tree is transferred to the target server.&nbsp;
+
+<p>    For this purpose it scans the content of the remote size at the beginning and compare its status with the original: only&nbsp; missing files 
+will be transferred.&nbsp; Tested on samples up to 350TB.<p>    Can serve as poor man Aspera you can't find suitable UDP based 
+transfer program, although UDP is better for WAN.
 
 
 
-<h3> PERFORMANCE  
-
-
-
-</h3>
-
-
-
-<p>    With latency 100 msec and 8 threads transfer rate varies between 50 and 100 MB/sec. 
+<p>    With latency around 100 msec and 8 threads transfer rate varies between 50 and 100 MB/sec. Sometimes I managed to transfer 
+over 4TB in 24 hours. 
 
 
 
@@ -88,7 +85,7 @@ blockquote {font-size: 10pt; font-family: arial; background: #F9F9F9}
 
 
 
-<p>   Like may copy utilities, this utility has two parameters (source dir and traget dir). Both are obligatory and can't be omitted unless they are specified in config file
+<p>   Like may copy utilities, this utility has two parameters (source dir and target dir). Both are obligatory and can't be omitted unless they are specified in config file
 
 
 
@@ -107,11 +104,13 @@ blockquote {font-size: 10pt; font-family: arial; background: #F9F9F9}
 
 
 
-<p> 1. By specifying absolute path to BASE directory on the source and target. All files in this directory will be transferred
+<p>1. By specifying absolute path to BASE directory on the source and target. All files in this directory will be transferred
 
 
 
-   <pre class="code">msync BASE_DIRECTORY_SOURCE BASE_DIRECTORY_ON_TARGET </pre>
+   although it might need multiple invocations.</p>
+
+<pre class="code">msync BASE_DIRECTORY_SOURCE BASE_DIRECTORY_ON_TARGET </pre>
 
    <p>For example:
 
@@ -133,7 +132,8 @@ blockquote {font-size: 10pt; font-family: arial; background: #F9F9F9}
 
 <p> NOTE:
 
-<p>    if invoked with three parameters the third parameter is interpreted as the the common tail and added to BASE_DIRECTORY_SOURCE and BASE_DIRECTORY_ON_TARGET
+<p>    if invoked with three parameters the third parameter is interpreted as the common tail and added to both <tt>BASE_DIRECTORY_SOURCE</tt> and 
+<tt>BASE_DIRECTORY_ON_TARGET</tt>
 
    <pre class="code">msync BASE_DIRECTORY TARGET_DIRECTORY SUBDIRECTORY </pre>
 
@@ -176,12 +176,12 @@ Files with relative path are considered to based on the BASE DIRECTORY (the firs
 
 <p>   -r -- RUN AT specified time. If this option is specified it is used in at command which is issues from the utility and 
 eventually will launches all threads.         For example as  -r now.&nbsp;         By default launch file are generated but are not 
-launched. The command for launching&nbsp; them(<tt>launcher</tt>) also is generated and listed in the protocol.         You can schedule the msync utility via cron can be invoked at 7PM each day and kill all threats is they exist at 6 AM.         The next day it will restart from the point at which it was interrupted. Sometimes rsync leave 
-partial files without renaming them so it is better to use limit of tranfered file (see option -m above)<p>         This is an open problem
+launched. The command for launching&nbsp; them <tt>(launcher</tt>) also is generated and listed in the protocol.         You can schedule the msync utility via cron can be invoked at 7PM each day and kill all threats is they exist at 6 AM.         The next day it will restart from the point at which it was interrupted. Sometimes rsync leave 
+partial files without renaming them so it is better to use limit of transferred file (see option -m above)<p>         This is an open problem
 
    <ul>
 
-      <li>-S -- list of ssh parameters which is passed to SSH "as is"  (for example  -S '-i /home/bezroun/.ssh/id_rsa.tt -P 222';
+      <li>-S -- list of ssh parameters which is passed to SSH "as is"  (for example  <tt>-S '-i /home/bezroun/.ssh/id_rsa.tt -P 222'</tt>;
       </li>
 
       <li>-t -- target site IP or DNS name
@@ -190,7 +190,7 @@ partial files without renaming them so it is better to use limit of tranfered fi
 
 </li>
 
-      <li>-u -- user name on target site if different from the USER env variable.         (should be configured with the passwordless $SSH login from the source site)
+      <li>-u -- user name on target site if different from the <tt>USER</tt> env variable.         (should be configured with the passwordless SSH login from the source site)
 
 
 
@@ -200,7 +200,7 @@ partial files without renaming them so it is better to use limit of tranfered fi
 
 </li>
 
-      <li>-x -- attemtp to recover partial file with rsync extentions </li>
+      <li>-x -- attempt to recover partial file with rsync extensions </li>
 
       <li>-h -- help
 
@@ -208,7 +208,8 @@ partial files without renaming them so it is better to use limit of tranfered fi
 
 </li>
 
-      <li>-d -- debug flag (0 -production mode; 1-3 -various debugging modes with additional debugging output). Ff debug is greater then zero, the source is saved in archive ~/Archive, if it was changed form the prev run.
+      <li>-d -- debug flag (0 -production mode; 1-3 -various debugging modes with additional debugging output). if debug is greater then zero, the source is saved in archive
+      <tt>~/Archive</tt>, if it was changed form the prev run.
       </li>
       </ul>
 
@@ -228,14 +229,14 @@ partial files without renaming them so it is better to use limit of tranfered fi
          the optimal number for your situation. For some reason on large files rsync works better than tar, even if they do not 
          exist of the target. </li>
 
-         <li>default GIT directory is $HOME/Archive. It is used only during debugging. This directory should be different from 
+         <li>default GIT directory is <tt>$HOME/Archive</tt>. It is used only during debugging. This directory should be different from 
          &quot;running directory, from which script is launched </li>
 
          <li>Split option is not implemented.  Currently it can't split huge files and reassemble then automatically on the target server.
          </li>
 
-         <li>In the future versions option b specified chunk size might be implemented. Right now I do not feel that it is necessary 
-         although I did incounted that some ;arge files need to be split for storage.&nbsp; One advantage of option -b would be that 
+         <li>In the future versions option <tt>-b</tt> specified chunk size might be implemented. Right now I do not feel that it is necessary 
+         although I did encountered situation in which some large files need to be split for storage.&nbsp; One advantage of option -b would be that 
          that&nbsp; number of threads equal 8 and the file we need to transfer is 40TB will be split into 8 chunks. </li>
          </ol>
 
