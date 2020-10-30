@@ -85,7 +85,7 @@
       $LOG_DIR=$options{'l'};
       `mkdir -p -m 770 $LOG_DIR` unless ( -d "$LOG_DIR" );
    }
-   banner("$SCRIPT_NAME (wrapper for rsync for parallel tranmission of files over WAN");
+   banner("$SCRIPT_NAME (wrapper for rsync for parallel transmission of large files over WAN");
    out("Log directory is $LOG_DIR\n");
    if(  exists $options{'h'} ){
       helpme();
@@ -275,10 +275,11 @@
 # Calculate the number of piles
 #
    $number_of_piles=$THREADS-1; #correction as we count pile from 0
-   $average_size_of_pile=$total_size/$THREADS; #each pile
+   $average_size_of_pile=$total_size/$THREADS; # each pile
    $files_to_process=scalar(@FnameA);
-   out('',"Total number of files to process: $files_to_process\n");
-
+   out("\nMissing files to transfere         : $files_to_process");
+   out("Incomplete or older files to update: ".scalar(@PartialFileA));
+    out("Of them $THREADS will be processsed in this session");
    out('Total size: '.humanfs($total_size),' Average pile size: '.humanfs($average_size_of_pile));
    out("$THREADS threads will be used to transfere the data\n");
 
@@ -287,12 +288,14 @@
 #
 
    for ($i=0; $i<=$number_of_piles; $i++ ){
-      if( @PartialFileA && $#PartialFileA<=$i ){
+      if( $#PartialFileA > -1  && $i <= $#PartialFileA ){
          # we have a partial file to be inserted
          $PileSizeA[$i]=$PartialDiffA[$i]; # initialize for insertion of incomplete files, which go first
          $PileA[$i][0]=$PartialFileA[$i]; # add file name of arcially transfered file
+         $PileLastElemA[$i]=0;
       }else{
-        $PileLastElemA[$i]=$PileSizeA[$i]=0; # pile starts from element zero
+        $PileLastElemA[$i]=-1; # pile starts from element zero
+        $PileSizeA[$i]=0;
       }
    }
 
@@ -336,11 +339,11 @@
       out("\tPile $i has ".$PileLastElemA[$i]." entries and its size is: $human_readable_size\n");
    }
    unless(scalar(@FnameA) + scalar(@PartialFileA) == $total_entries_in_piles-$skipped_no ){
-      if ($debug){
-         out('Files in file array FnamA='.(scalar(@FnameA) + scalar(@PartialFileA)));
+      $delta=scalar(@FnameA) + scalar(@PartialFileA) == $total_entries_in_piles-$skipped_no;
+      if( $debug && $delta ){
+         out('Files in file array FnameA='.(scalar(@FnameA) + scalar(@PartialFileA)));
          out('total_entries_in_piles='.$total_entries_in_piles);
          out('skipped_zero_size_files='.$skipped_no);
-         $delta=scalar(@FnameA) + scalar(@PartialFileA) == $total_entries_in_piles-$skipped_no;
          out('delta='.$delta);
       }
    }
@@ -379,7 +382,7 @@
       pile_transfer_gen($i);
    }
 
-   out("\nOUTPUT DIRECTORY FOR LAUCHING PARRALEL TRANSFERE SCRIPTS IS $OUTPUT_DIR");
+   out("\nDIRECTORY FOR LAUNCHING PARALLEL TRANSFER SCRIPTS IS $OUTPUT_DIR\n");
    $launcher="cd $OUTPUT_DIR; for f in sub* ; do at -f $OUTPUT_DIR/\$f now; done";
    out('Launching script is as following:');
    out($launcher);
@@ -416,7 +419,7 @@ my $i=$_[0]; # number of the pile
 
    @FnameA=`cat $OUTPUT_DIR/pile$i`;
    for( my $k=0; $k<@FnameA; $k++ ){
-      $append_option=( $#PartialFileA<=$i && $k==0 ) ? '--append' : ''; # only the first entry in the pile can requre particl transfer.
+      $append_option=( $i<=$#PartialFileA && $k==0 ) ? '--append' : ''; # only the first entry in the pile can requre particl transfer.
       chomp($f=$FnameA[$k]);
       if( index($f, '/') >0 ){
          #files in the subdirectories of the BASE
@@ -424,7 +427,7 @@ my $i=$_[0]; # number of the pile
          $command=qq(rsync -a --partial $append_option -e '$SSH' '$f' '$TARGET_USER\@$TARGET_SITE:$TARGET_DIR/$dir/');
       } else {
          # files int the base directory
-         $command=qq(rsync -a --partial  -e '$SSH' '$f' '$TARGET_USER\@$TARGET_SITE:$TARGET_DIR/');
+         $command=qq(rsync -a --partial $append_option -e '$SSH' '$f' '$TARGET_USER\@$TARGET_SITE:$TARGET_DIR/');
       }
       gen_bash($command);
       gen_bash(qq(echo $command >> \$LOG));
