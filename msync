@@ -445,6 +445,10 @@ my ($line,$i);
          $conf[$i]='';
          next;
       }
+      if( $line eq '' || $line=/^\s*$/ ){
+         $conf[$i]=''; # emply line
+         next;
+      }
       if( $line=~/^\s*(.*\S)\s*$/ ){
          $line=$1;
       }
@@ -1071,4 +1075,3 @@ The split commands generate chunks named: foo.000, foo.001 ...
 For proper re-assembling you need to sort the  chunks first
 
    cd $TARGET && cat `ls foo.* | sort` > foo
-
