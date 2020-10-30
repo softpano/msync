@@ -33,7 +33,7 @@
 # 2.10  2020/10/28  BEZROUN   Diagnistic of options correctness improved. Some addtional sanity checks implemented
 # 2.20  2020/10/29  BEZROUN   If parcially transfered files are found they are inserted as the first element of each pile
 #=========================== START ======================================================================================================================
-
+   use v5.10;
    use warnings;
    use strict 'subs';
 
@@ -79,13 +79,14 @@
 #
 # Options
 #
+   logme('V',3,3); # initialise logme sho that it can be used in options
    getopts("vhc:d:f:g:l:m:p:r:S:u:t:",\%options);
    if(  exists  $options{'l'}  ){
       $LOG_DIR=$options{'l'};
       `mkdir -p -m 770 $LOG_DIR` unless ( -d "$LOG_DIR" );
    }
-   banner();
-   out("Log directory is $LOG_DIR");
+   banner("$SCRIPT_NAME (wrapper for rsync for parallel tranmission of files over WAN");
+   out("Log directory is $LOG_DIR\n");
    if(  exists $options{'h'} ){
       helpme();
       exit;
@@ -115,12 +116,10 @@
       $GREP_REGEX=$options{'g'};
    }
    if( exists  $options{'m'} ){
-      $LIMIT=$options{'m'};
-      if(substr($LIMIT,-1,1)=~/[TGMK]/ && substr($LIMIT,0,-1)=~/^\d+$/ ){
-         $LIMIT=convert(substr($LIMIT,0,-1),substr($LIMIT,-1,1));
-      }elsif( $LIMIT !~/^\d+$/ ){
-         logme('E',"The value '$LIMIT' of option -m (transfer limit) is incorrect. Should be integer with possible suffix T,G,G, or K. Ignored");
-      }
+     $LIMIT=decode_size_option($options{'m'});
+     if ( $LIMIT == -1 ){
+         logme('E',"The value option -m (transfer limit) is incorrect and ignored");
+     }
    }
 
    if(  exists $options{'p'}  ){
@@ -158,18 +157,10 @@
 
    if( 0 == $debug ){
       logme('V',3,3); # set verbosity1 and verbosity2. Verbosity is opposite to severity WEST -> TSEW 0 - T only; 1 - TS; 2 - TSE; 3 - TSEW;
-   }else{
-      logme('V',3,3); # set max verbosity1 and verbosity2.
    }
    ( $debug>0 ) && autocommit($SCRIPT_NAME); # sets script name and perform Self-CMS actions.
 
-#
-# Check is script is already running
-#
-   @instances=`pgrep -u $USER  $TARGET_SITE`;
-   if( scalar(@instances)>0 ){
-      die("Script is already running. Only one instance of this utility per user is allowed\n");
-   }
+
 
    #chomp($OUTPUT_DIR=`mktemp -d -p $OUTPUT_BASE/$ScriptDir$timestamp.XXXXXXXXX`);
 
@@ -204,6 +195,13 @@
    }
    out("The source directory: $BASE_DIR\nSSH parameters: $SSH");
    out("Target site: $TARGET_DIR\nTarget directory: $TARGET_DIR\nRemote user ID: $TARGET_USER");
+#
+# Check is script is already running
+#
+   @instances=`pgrep -u $USER  $TARGET_SITE`;
+   if( scalar(@instances)>0 ){
+      die("Script is already running. Only one instance of this utility per user is allowed\n");
+   }
 
    if( $FILELIST ){
       if( substr($FILELIST,0,1) eq '/'  ){
@@ -334,15 +332,21 @@
    for ($i=0; $i<=$number_of_piles; $i++ ){
       $total_entries_in_piles+=$PileLastElemA[$i];
       $total_in_piles+=$PileSizeA[$i];
-      $decode_size_option=humanfs($PileSizeA[$i]);
-      out("\tPile $i has ".$PileLastElemA[$i]." entries and its size is: $decode_size_option\n");
+      $human_readable_size=humanfs($PileSizeA[$i]);
+      out("\tPile $i has ".$PileLastElemA[$i]." entries and its size is: $human_readable_size\n");
    }
    unless(scalar(@FnameA) + scalar(@PartialFileA) == $total_entries_in_piles-$skipped_no ){
-      Logme('S', "Discrepancy exists between sum of missing files and parcial files and total enteires in piles minus skippe files");
+      if ($debug){
+         out('Files in file array FnamA='.(scalar(@FnameA) + scalar(@PartialFileA)));
+         out('total_entries_in_piles='.$total_entries_in_piles);
+         out('skipped_zero_size_files='.$skipped_no);
+         $delta=scalar(@FnameA) + scalar(@PartialFileA) == $total_entries_in_piles-$skipped_no;
+         out('delta='.$delta);
+      }
    }
    out("$total_entries_in_piles files in all piles\n");
-   $decode_size_option=humanfs($total_in_piles);
-   out("Total size of all piles is: $decode_size_option\n");
+   $human_readable_size=humanfs($total_in_piles);
+   out("Total size of all piles is: $human_readable_size\n");
    $delta_size=$total_in_piles-$total_size;
    if( $delta_size !=0  ){
       logme('S','The original size is '.humanfs($total_size).', while the size of all piles is '.humanfs($total_in_piles),'Delta is '.humanfs($delta_size));
@@ -412,7 +416,7 @@ my $i=$_[0]; # number of the pile
 
    @FnameA=`cat $OUTPUT_DIR/pile$i`;
    for( my $k=0; $k<@FnameA; $k++ ){
-      $apprend_option=( $#PartialFileA<=$i && $k==0 ) ? '--append' : ''; # only the first entry in the pile can requre particl transfer.
+      $append_option=( $#PartialFileA<=$i && $k==0 ) ? '--append' : ''; # only the first entry in the pile can requre particl transfer.
       chomp($f=$FnameA[$k]);
       if( index($f, '/') >0 ){
          #files in the subdirectories of the BASE
@@ -445,14 +449,14 @@ my ($line,$i);
          $conf[$i]='';
          next;
       }
-      if( $line eq '' || $line=/^\s*$/ ){
+      if( $line eq '' || $line=~/^\s*$/ ){
          $conf[$i]=''; # emply line
          next;
       }
       if( $line=~/^\s*(.*\S)\s*$/ ){
          $line=$1;
       }
-      if( $line=~/^(\w+)\s*=\s*['"](.*)['"]/ ){
+      if( $line=~/^(\w+)\s*=\s*['"](.*?)['"]/ ){
          if( $2=~tr/'"// ){
             die(qq(Wrong value $1 in line $i of config file $config_file -- string parameter can't contain ' or "" within its value.));
          }
@@ -635,7 +639,7 @@ my $s=$_[1];
    if( substr($f,0,2) eq './' ){ $f=substr($f,2); } # remove prefix ./ present in find results
    if( exists $AlreadyTransferedA{$f} ){
       if( $s == $AlreadyTransferedA{$f} ){
-         ($debug) &&  print "[OK] File $f with size".humanfs($s)."was transmitted sucessfully\n";
+         ($debug) &&  print "[OK] File $f with size ".humanfs($s)." was transmitted sucessfully\n";
          return 0;
       }else{
         logme('E',"Partially transmitted file $f detected:\n\tThe original size is ".humanfs($s).' while transmitted size is '. humanfs($AlreadyTransferedA{$f}));
@@ -676,37 +680,46 @@ my $dir;
 }
 sub decode_size_option
 {
-my $s=$_[0];
-   if( $s=~/(\d*\.?\d+){[KMGT]}/ ){
-       $value=$1;
-       if( $2 eq 'K' ){
-         $value*=1024;
-       }elsif( $2 eq 'M' ){
-         $value*=1024**2;
-       }elsif( $2 eq 'G' ){
-         $value*=1024**3;
-       }elsif( $2 eq 'T' ){
-         $value*=1024**4;
-       }
-       return $value;
+my $value=$_[0];
+my $suffix=substr($_[0],-1,1);
+   if($suffix=~/[KMGT]/){
+      $value=substr($value,0,-1);
+   }elsif($suffix !~ /\d/ ){
+      logme('S',"The last character of the size $_[0] can be iether digit, or letter K, M, G, or T");
+      return -1;
    }
-   logme('S',"Size $s is specified incorrectly (allowed suffixes for size are K, M, G, or T");
-   return 0;
-}
+   if( $value=~/^\d+\.?\d*?$/){
+       logme('S',"the value of option -s $_[0] specified incorrectly. Should like 99.99 with optional suffix  K,M,G, or T");
+   }
+   if( $suffix eq 'K' ){
+     $value*=1024;
+   }elsif( $suffix eq 'M' ){
+     $value*=1024**2;
+   }elsif( $suffix eq 'G' ){
+     $value*=1024**3;
+   }elsif( $suffix eq 'T' ){
+     $value*=1024**4;
+   }
+   return $value;
+} #decode_size_option
+
+sub humanfs
 #
 # convert size in bytes into human readable value.
 #
-sub humanfs
 {
 my $s=$_[0];
+   if( $s>(1024**4) ){
+      return sprintf("%.2fT",$s/(1024**4));
+   }
    if( $s>(1024**3) ){
-    return sprintf("%.2f G",$s/(1024**3));
+      return sprintf("%.2fG",$s/(1024**3));
    }
    if( $s>(1024**2) ){
-    return sprintf("%.2f M",$s/(1024**2));
+      return sprintf("%.2fM",$s/(1024**2));
    }
    if( $s>1024 ){
-    return sprintf("%.2f K",$s/1024);
+      return sprintf("%.2fK",$s/1024);
    }
    return $s;
 }
@@ -741,7 +754,7 @@ my $file=$_[0];
 my $GIT_DIR=$ENV{'HOME'}.'/Archive';
 my $script_delta=0;
    return if $debug==0;
-   mkdir -p $GIT_DIR unless -d $GIT_DIR;
+   `mkdir -p $GIT_DIR` unless -d $GIT_DIR;
    if(  -f "$GIT_DIR/$file" ){
       if( (-s $0) == (-s "$GIT_DIR/$file")   ){
          $script_delta=`diff $0 $GIT_DIR/$file`;
@@ -869,10 +882,10 @@ sub abend
 {
 my $message;
 my ($package, $filename, $lineno) = caller;
-   $message="$lineno $_[1]. Exiting ";
+   $message="$SCRIPT_NAME-T$lineno $_[0]. Exiting... ";
    out($message);
    #  Syslog might not be availble
-   die("Abend at $lineno. $message");
+   exit 255;
 } # abend
 #
 ### sub banner:  open log file and print inital line for the script
@@ -886,8 +899,9 @@ my $logstamp=`date +"%y%m%d_%H%M"`;
    $LOG_FILE=$LOG_DIR.'/'.$USER.$logstamp.'.log';
    open (SYSLOG, ">$LOG_FILE") or die("Permissions for log directory $LOG_DIR does not allow to write to it by user $USER. Fatal error...");
    $SCRIPT_MOD_DATE=`date -r $0 +"%y%m%d_%H%M"`; chomp $SCRIPT_MOD_DATE;
-my $title="\n\n=== $SCRIPT_NAME: $VERSION $SCRIPT_MOD_DATE. DEBUG=$debug , Start at $today ===";
-   out($title);
+my $title="\n\n=== $_[0] $VERSION $SCRIPT_MOD_DATE.";
+   $title.="DEBUG=$debug, " if $debug;
+   out($title."Start at $today ===");
 } # banner
 #
 # sub mkdirs: create direftories using option -p
