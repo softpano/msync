@@ -1,9 +1,9 @@
 #!/usr/bin/perl
 #:: msync -- wrapper for rsync that allow multistream transfer of a large number of archives of other huge files from a given directory tree over high latency WAN
-#::          Can be used for tranfering files to Amazon and AWS
+#::          Can be used for transferring files to Amazon and AWS
 #:: Nikolai Bezroukov, 2018-2020; Licensed under Artistic license
 #::
-#:: short insturctions is __DATA__ file. Printable via msync -h
+#:: short instructions is __DATA__ file. Printable via msync -h
 #:: User guide is at http://www.softpanorama.org/Utilities/Msync/readme.shtml
 #::
 #--- Development History
@@ -11,27 +11,27 @@
 # Ver      Date        Who        Modification
 # ====  ==========  ========  ==============================================================
 # 0.10  2018/06/25  BEZROUN   Initial implementation
-# 0.20  2018/06/26  BEZROUN   Switched from scp to tar and lauching of tar stream proccesses via at command
-# 0.30  2018/06/27  BEZROUN   MAX_SIZE parameter is introduced to limit Friday to Monday transferes to specified amount (for example 5TB).
+# 0.20  2018/06/26  BEZROUN   Switched from scp to tar and launching of tar stream processes via at command
+# 0.30  2018/06/27  BEZROUN   MAX_SIZE parameter is introduced to limit Friday to Monday transfers to specified amount (for example 5TB).
 # 0.40  2018/06/28  BEZROUN   filelist now can contain directories
 # 0.50  2018/06/29  BEZROUN   Temporary directory is now individual for each invocation
-# 0.60  2018/07/02  BEZROUN   Intelligent handling of partial tranmissions via pile substitution and Rsync invocation.
+# 0.60  2018/07/02  BEZROUN   Intelligent handling of partial transmissions via pile substitution and Rsync invocation.
 # 0.70  2018/07/02  BEZROUN   Mode variable was introduced. If files are larger then MAX_SIZE rsync will be used.
 # 0.80  2018/07/03  BEZROUN   If target directory does not exists on target it now is created and set to EFFECTIVE USER as the owner.
-# 0.90  2018/07/03  BEZROUN   Log in submisssion script now contain STDIN and STDER to simplify dignositcs
+# 0.90  2018/07/03  BEZROUN   Log in submission script now contain STDIN and STDER to simplify diagnostics
 # 0.91  2018/07/05  BEZROUN   The third parameter is introduced -- subdirectory which concatenated to both source and target directory.
-# 0.92  2018/07/09  BEZROUN   The attempt to resume interupted file transferes implemented via rsync
+# 0.92  2018/07/09  BEZROUN   The attempt to resume interrupted file transfers implemented via rsync
 # 0.93  2018/07/10  BEZROUN   Option -g introduced for selection of folders using regular expression like 14*
 # 0.93  2018/07/15  BEZROUN   Handling of files with "perverted names" (Round brackets and spaces are example of perversions)
 # 1.00  2018/07/20  BEZROUN   Version used in production
 # 1.10  2019/08/11  BEZROUN   Adaptation for the new purpose -- recovery of damaged genomic trees of files.
-# 1.20  2020/08/27  BEZROUN   Transfere of large multiterabyte files is now possible.
+# 1.20  2020/08/27  BEZROUN   Transfer of large multiterabyte files is now possible.
 # 1.30  2020/08/27  BEZROUN   rsync behaves differently if option --append is given and the file does not exist. It tries to create a file out of directory in this case.
-#                             Details are unclear and might be due to my low uinderstadning of rsync (may be trailing slashes in the target resolve this problem)
+#                             Details are unclear and might be due to my low understanding of rsync (may be trailing slashes in the target resolve this problem)
 # 1.40  2020/08/28  BEZROUN   logging goes by default to /tmp, but now location can be changed via option -l.
-# 2.00  2020/09/01  BEZROUN   Configuration is now posible via config file. The new version of softpano.pm was included in the main text directly.
-# 2.10  2020/10/28  BEZROUN   Diagnistic of options correctness improved. Some addtional sanity checks implemented
-# 2.20  2020/10/29  BEZROUN   If parcially transfered files are found they are inserted as the first element of each pile
+# 2.00  2020/09/01  BEZROUN   Configuration is now possible via config file. The new version of softpano.pm was included in the main text directly.
+# 2.10  2020/10/28  BEZROUN   Diagnostic of options correctness improved. Some additional sanity checks implemented
+# 2.20  2020/10/29  BEZROUN   If partially transferred files are found they are inserted as the first element of each pile
 #=========================== START ======================================================================================================================
    use v5.10;
    use warnings;
@@ -50,7 +50,7 @@
    $LIMIT=0; # CONFIG-eligible
    $GREP_REGEX=''; # CONFIG-eligible
 #
-# Internal variable unitialization
+# Internal variable initialization
 #
    $USER=$ENV{'USER'};
    $OUTPUT_BASE='/tmp/'.ucfirst($SCRIPT_NAME).'_'.$USER;
@@ -72,14 +72,14 @@
 #
 # Initialization for logme
 #
-   @ermessage_db={}; # accumulates messages for each caterory (warning, errors and severe errors)
+   @ermessage_db={}; # accumulates messages for each category (warning, errors and severe errors)
    @ercounter=(0,0,0,0);
    $delim='=' x 80;
 
 #
 # Options
 #
-   logme('V',3,3); # initialise logme sho that it can be used in options
+   logme('V',3,3); # initialize logme sho that it can be used in options
    getopts("vhc:d:f:g:l:m:p:r:S:u:t:",\%options);
    if(  exists  $options{'l'}  ){
       $LOG_DIR=$options{'l'};
@@ -126,7 +126,7 @@
       if(  exists $options{'p'}  ){
          $THREADS=$options{'p'};
          if( $THREADS<2 ){
-            logme('E','The value of option p (number of parallel transferes) is incorrect, 3 assumed');
+            logme('E','The value of option p (number of parallel transfers) is incorrect, 3 assumed');
            $THREADS=3;
          };
       }
@@ -150,7 +150,7 @@
       if ($options{'v'}>=0 && $options{'v'}<=3){
          logme('V',$options{'v'},$options{'v'});
       }else{
-         logme('E','The value of option v (number of parallel transferes) is outside the range 0..3. 3 assumed');
+         logme('E','The value of option v (number of parallel transfers) is outside the range 0..3. 3 assumed');
          logme('V',3,3);
       }
    }
@@ -218,21 +218,21 @@
       out("The filelist used: $FILELIST");
    }
 
-   $FsizeA_to_be_transfered=0; # calculated in get_list call
+   $total_size_to_be_transfered=0; # calculated in get_list call
    if(  -f $FILELIST ){
       get_list('f');
    } else {
       get_list('d');
    }
 #
-# Was the previous transfere completed or there are partial file on the target?
+# Was the previous transfer completed or there are partial file on the target?
 #
 
    if( scalar(@FnameA)+scalar(@PartialFileA)==0 ){
-      logme('W',"All files are already transfered. Nothing to do...");
+      logme('W',"All files are already transferred. Nothing to do...");
       exit 0;
    }
-   logme('W',scalar(@FnameA)." files scheduled for transfer with the total size $FsizeA_to_be_transfered");
+   logme('W',scalar(@FnameA)." files scheduled for transfer with the total size $total_size_to_be_transfered");
 
 #
 # Insertion sorting
@@ -258,8 +258,8 @@
    }
 
 #
-#  Check for limit of transfere and translate the FnameA if it is too big.
-#  Useful for weekend tranmission where you approx know how much you can transfere over the weekend.
+#  Check for limit of transfer and translate the FnameA if it is too big.
+#  Useful for weekend transmission where you approx know how much you can transfer over the weekend.
 #
    $total_size=0;
    for ($i=0; $i<@FnameA; $i++ ){
@@ -277,21 +277,21 @@
    $number_of_piles=$THREADS-1; #correction as we count pile from 0
    $average_size_of_pile=$total_size/$THREADS; # each pile
    $files_to_process=scalar(@FnameA);
-   out("\nMissing files to transfere         : $files_to_process");
+   out("\nMissing files to transfer         : $files_to_process");
    out("Incomplete or older files to update: ".scalar(@PartialFileA));
-    out("Of them $THREADS will be processsed in this session");
+    out("Of them $THREADS will be processed in this session");
    out('Total size: '.humanfs($total_size),' Average pile size: '.humanfs($average_size_of_pile));
-   out("$THREADS threads will be used to transfere the data\n");
+   out("$THREADS threads will be used to transfer the data\n");
 
 #
-# Additing partial files to each heap
+# Adding partial files to each heap
 #
 
    for ($i=0; $i<=$number_of_piles; $i++ ){
       if( $#PartialFileA > -1  && $i <= $#PartialFileA ){
          # we have a partial file to be inserted
          $PileSizeA[$i]=$PartialDiffA[$i]; # initialize for insertion of incomplete files, which go first
-         $PileA[$i][0]=$PartialFileA[$i]; # add file name of arcially transfered file
+         $PileA[$i][0]=$PartialFileA[$i]; # add file name of arcially transferred file
          $PileLastElemA[$i]=0;
       }else{
         $PileLastElemA[$i]=-1; # pile starts from element zero
@@ -368,10 +368,10 @@
        }
        close SYSOUT;
    }
-   # At this point we have FnameAgs of files and can send then via tar in parallael using at coomand
+   # At this point we have list of files and can send them to the target in several parallel streams
    chdir($BASE_DIR); # just in case
 #
-# Generate scipips from piles
+# Generate scripts from piles
 #
 
    for ( my $i=0; $i<=$number_of_piles; $i++ ){
@@ -657,7 +657,7 @@ my $s=$_[1];
    ($debug) &&  print "File $f does not exists on remote host\n";
    $FsizeA[scalar(@FsizeA)]=$s;
    $FnameA[scalar(@FnameA)]=$f;
-   $FsizeA_to_be_transfered+=$s;
+   $total_size_to_be_transfered+=$s;
    return 2;
 }
 
