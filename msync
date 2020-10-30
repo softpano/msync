@@ -31,13 +31,13 @@
 # 1.40  2020/08/28  BEZROUN   logging goes by default to /tmp, but now location can be changed via option -l.
 # 2.00  2020/09/01  BEZROUN   Configuration is now possible via config file. The new version of softpano.pm was included in the main text directly.
 # 2.10  2020/10/28  BEZROUN   Diagnostic of options correctness improved. Some additional sanity checks implemented
-# 2.20  2020/10/29  BEZROUN   If partially transferred files are found they are inserted as the first element of each pile
+# 2.20  2020/10/29  BEZROUN   If partially transferred non text files  are found they are inserted as the first element of each pile
 #=========================== START ======================================================================================================================
    use v5.10;
    use warnings;
    use strict 'subs';
 
-   $debug=1;
+   $debug=0;
    $VERSION='2.20';
    $SCRIPT_NAME='msync';
 #
@@ -227,7 +227,6 @@
 #
 # Was the previous transfer completed or there are partial file on the target?
 #
-
    if( scalar(@FnameA)+scalar(@PartialFileA)==0 ){
       logme('W',"All files are already transferred. Nothing to do...");
       exit 0;
@@ -258,6 +257,26 @@
    }
 
 #
+# Calculate the number of piles
+#
+   $number_of_piles=$THREADS-1; #correction as we count piles from 0
+   $files_to_process=scalar(@FnameA);
+   if( $files_to_process>0 ){
+      out("\nMissing files to transfer         : $files_to_process");
+      $all_partial=0;
+      if (scalar(@PartialFileA)) {
+         out("Incomplete or older files to update: ".scalar(@PartialFileA));
+         out("Of them $THREADS will be processed in this session");
+      }
+   }else{
+      $all_partial=1;
+      logme('W',"No missing files. Only parcially transfered or older files processed");
+      @FsizeA=@PartialDiffA; @PartialDiffA=();
+      @FnameA=@PartialFileA; @PartialFileA=()
+   }
+
+   out("$THREADS threads will be used to transfer the data\n");
+#
 #  Check for limit of transfer and translate the FnameA if it is too big.
 #  Useful for weekend transmission where you approx know how much you can transfer over the weekend.
 #
@@ -266,23 +285,21 @@
       $total_size+=$FsizeA[$i];
       if( $LIMIT>0 && $total_size>$LIMIT ){
          @FnameA=splice(@FnameA,$i); # truncate the FnameA
-         logme('W',"Total size is about $LIMIT, FnameA of files truncated at $i");
+         @FsizeA=splice(@FsizeA,$i); # truncate the FnameA
+         logme('W',"Total size is about $LIMIT, Number of missing files to transfer truncated at $i");
          last;
       } # if
    } #for
-
-#
-# Calculate the number of piles
-#
-   $number_of_piles=$THREADS-1; #correction as we count pile from 0
-   $average_size_of_pile=$total_size/$THREADS; # each pile
-   $files_to_process=scalar(@FnameA);
-   out("\nMissing files to transfer         : $files_to_process");
-   out("Incomplete or older files to update: ".scalar(@PartialFileA));
-    out("Of them $THREADS will be processed in this session");
-   out('Total size: '.humanfs($total_size),' Average pile size: '.humanfs($average_size_of_pile));
-   out("$THREADS threads will be used to transfer the data\n");
-
+   for ($i=0; $i<@PartialDiffA; $i++ ){
+      $total_size+=$PartialDiffA[$i];
+      if( $LIMIT>0 && $total_size>$LIMIT ){
+         @PartialDiffA=splice(@PartialDiffA,$i); # truncate
+         @PartialFileA=splice(@PartialDiffA,$i); # truncate
+         logme('W',"Total size is about $LIMIT, Number of partial or older files to transfer truncated at $i");
+         last;
+      } # if
+   } #for
+   out('Total size of files to be transfered: '.humanfs($total_size));
 #
 # Adding partial files to each heap
 #
@@ -333,10 +350,10 @@
    $total_entries_in_piles=0;
    $total_in_piles=0;
    for ($i=0; $i<=$number_of_piles; $i++ ){
-      $total_entries_in_piles+=$PileLastElemA[$i];
+      $total_entries_in_piles+=$PileLastElemA[$i]+1;
       $total_in_piles+=$PileSizeA[$i];
       $human_readable_size=humanfs($PileSizeA[$i]);
-      out("\tPile $i has ".$PileLastElemA[$i]." entries and its size is: $human_readable_size\n");
+      out("\tPile $i has ".($PileLastElemA[$i]+1)." entries and its size is: $human_readable_size\n");
    }
    unless(scalar(@FnameA) + scalar(@PartialFileA) == $total_entries_in_piles-$skipped_no ){
       $delta=scalar(@FnameA) + scalar(@PartialFileA) == $total_entries_in_piles-$skipped_no;
@@ -362,7 +379,7 @@
    for ($i=0; $i<=$number_of_piles; $i++ ){
        next if( $PileSizeA[$i] == 0 );
        open SYSOUT,">$OUTPUT_DIR/pile$i";
-       for ($k=0; $k<$PileLastElemA[$i]; $k++ ){
+       for ($k=0; $k<=$PileLastElemA[$i]; $k++ ){
            next unless (defined($PileA[$i][$k]));
            print SYSOUT $PileA[$i][$k]."\n";
        }
@@ -419,7 +436,7 @@ my $i=$_[0]; # number of the pile
 
    @FnameA=`cat $OUTPUT_DIR/pile$i`;
    for( my $k=0; $k<@FnameA; $k++ ){
-      $append_option=( $i<=$#PartialFileA && $k==0 ) ? '--append' : ''; # only the first entry in the pile can requre particl transfer.
+      $append_option=($all_partial || ( $i<=$#PartialFileA && $k==0) ) ? '--append' : ''; # only the first entry in the pile can requre particl transfer.
       chomp($f=$FnameA[$k]);
       if( index($f, '/') >0 ){
          #files in the subdirectories of the BASE
@@ -618,9 +635,6 @@ my $partial=0;
          $rc=add_to_list($f,$s);
          if ($rc==1) {
             $partial++;
-            if ($partial%100==0) {
-               logme('I',"The number of partially transfered files reached $partial");
-            }
          }
       }
       ($partial) && logme('I',"There are $partial partially transfered files in the target folder");
@@ -644,11 +658,20 @@ my $s=$_[1];
       if( $s == $AlreadyTransferedA{$f} ){
          ($debug) &&  print "[OK] File $f with size ".humanfs($s)." was transmitted sucessfully\n";
          return 0;
+      }elsif($s>$AlreadyTransferedA{$f}){
+        logme('E',"Possible partially transmitted file $f detected:\n\tThe original size is ".humanfs($s).' while transmitted size is '. humanfs($AlreadyTransferedA{$f}));
+        chomp($ftype=`file $f`);
+        if( index($ftype,'text') >- 1 ){
+          logme('E',"File $f has type $ftype. Difference might be due to the conversiton from DOS to Unix encoding for text files");
+          return 0;
+        }else{
+          $PartialFileA[scalar(@PartialFileA)]=$f;
+          $PartialDiffA[scalar(@PartialDiffA)]=$s-$AlreadyTransferedA{$f}; # can't use scalar(@PartialFileA) as it already increased. Need a varible to do that
+          return 1;
+        }
       }else{
-        logme('E',"Partially transmitted file $f detected:\n\tThe original size is ".humanfs($s).' while transmitted size is '. humanfs($AlreadyTransferedA{$f}));
-        $PartialFileA[scalar(@PartialFileA)]=$f;
-        $PartialDiffA[scalar(@PartialDiffA)]=$s-$AlreadyTransferedA{$f}; # can't use scalar(@PartialFileA) as it already increased. Need a varible to do that
-        return 1;
+         logme('E',"The size of file $f on target is $AlreadyTransferedA{$f} and is larger than on source: $s. Skipped");
+         return 0;
       }
    }
    #
@@ -685,14 +708,16 @@ sub decode_size_option
 {
 my $value=$_[0];
 my $suffix=substr($_[0],-1,1);
-   if($suffix=~/[KMGT]/){
+   if($suffix=~/\w/){
       $value=substr($value,0,-1);
-   }elsif($suffix !~ /\d/ ){
-      logme('S',"The last character of the size $_[0] can be iether digit, or letter K, M, G, or T");
-      return -1;
+      if( $suffix !~/[KMGT]/ ){
+         logme('S',"Unrecognized suffix. Should be K, M, G, or T");
+         return -1;
+      }
    }
-   if( $value=~/^\d+\.?\d*?$/){
+   if( $value=~/^\d+\.?\d*$/){
        logme('S',"the value of option -s $_[0] specified incorrectly. Should like 99.99 with optional suffix  K,M,G, or T");
+       return -1;
    }
    if( $suffix eq 'K' ){
      $value*=1024;
@@ -885,7 +910,7 @@ sub abend
 {
 my $message;
 my ($package, $filename, $lineno) = caller;
-   $message="$SCRIPT_NAME-T$lineno $_[0]. Exiting... ";
+   $message="$SCRIPT_NAME-T$lineno $_[0]. Exiting...\n\n";
    out($message);
    #  Syslog might not be availble
    exit 255;
@@ -983,7 +1008,10 @@ Nikolai Bezroukov, 2018-2020. Licensed under Artistic license
 
 msync organizes files into given number of "piles" and transfers all piles in parallel using for each separate invocation of rsync the target server.
 
-Can be used for transferring large file such as genomes files to/from AWS and for finishing botched transfers of huge files,
+It is designed mainly to transfer compressed tarballs and other compressed file.
+Resumption of partial transfere does not work well on uncompressed text files as encoding in source and target might be different
+
+Can be used for transferring large file such as genomes tarballs to/from AWS and for finishing botched transfers of huge archives,
 started using scp or tar.
 
 It detects and automatically restarts the transmission of partially transferred files but only if the file name of partially transferred
