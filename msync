@@ -1,0 +1,1074 @@
+#!/usr/bin/perl
+#:: msync -- wrapper for rsync that allow multistream transfer of a large number of archives of other huge files from a given directory tree over high latency WAN
+#::          Can be used for tranfering files to Amazon and AWS
+#:: Nikolai Bezroukov, 2018-2020; Licensed under Artistic license
+#::
+#:: short insturctions is __DATA__ file. Printable via msync -h
+#:: User guide is at http://www.softpanorama.org/Utilities/Msync/readme.shtml
+#::
+#--- Development History
+#
+# Ver      Date        Who        Modification
+# ====  ==========  ========  ==============================================================
+# 0.10  2018/06/25  BEZROUN   Initial implementation
+# 0.20  2018/06/26  BEZROUN   Switched from scp to tar and lauching of tar stream proccesses via at command
+# 0.30  2018/06/27  BEZROUN   MAX_SIZE parameter is introduced to limit Friday to Monday transferes to specified amount (for example 5TB).
+# 0.40  2018/06/28  BEZROUN   filelist now can contain directories
+# 0.50  2018/06/29  BEZROUN   Temporary directory is now individual for each invocation
+# 0.60  2018/07/02  BEZROUN   Intelligent handling of partial tranmissions via pile substitution and Rsync invocation.
+# 0.70  2018/07/02  BEZROUN   Mode variable was introduced. If files are larger then MAX_SIZE rsync will be used.
+# 0.80  2018/07/03  BEZROUN   If target directory does not exists on target it now is created and set to EFFECTIVE USER as the owner.
+# 0.90  2018/07/03  BEZROUN   Log in submisssion script now contain STDIN and STDER to simplify dignositcs
+# 0.91  2018/07/05  BEZROUN   The third parameter is introduced -- subdirectory which concatenated to both source and target directory.
+# 0.92  2018/07/09  BEZROUN   The attempt to resume interupted file transferes implemented via rsync
+# 0.93  2018/07/10  BEZROUN   Option -g introduced for selection of folders using regular expression like 14*
+# 0.93  2018/07/15  BEZROUN   Handling of files with "perverted names" (Round brackets and spaces are example of perversions)
+# 1.00  2018/07/20  BEZROUN   Version used in production
+# 1.10  2019/08/11  BEZROUN   Adaptation for the new purpose -- recovery of damaged genomic trees of files.
+# 1.20  2020/08/27  BEZROUN   Transfere of large multiterabyte files is now possible.
+# 1.30  2020/08/27  BEZROUN   rsync behaves differently if option --append is given and the file does not exist. It tries to create a file out of directory in this case.
+#                             Details are unclear and might be due to my low uinderstadning of rsync (may be trailing slashes in the target resolve this problem)
+# 1.40  2020/08/28  BEZROUN   logging goes by default to /tmp, but now location can be changed via option -l.
+# 2.00  2020/09/01  BEZROUN   Configuration is now posible via config file. The new version of softpano.pm was included in the main text directly.
+# 2.10  2020/10/28  BEZROUN   Diagnistic of options correctness improved. Some addtional sanity checks implemented
+# 2.20  2020/10/29  BEZROUN   If parcially transfered files are found they are inserted as the first element of each pile
+#=========================== START ======================================================================================================================
+
+   use warnings;
+   use strict 'subs';
+
+   $debug=1;
+   $VERSION='2.20';
+   $SCRIPT_NAME='msync';
+#
+# Options that can be set via config file
+#
+   $SSH='ssh'; # CONFIG-eligible
+   $RUN_AT=''; # CONFIG-eligible
+   $FILELIST=''; # CONFIG-eligible
+   $THREADS=4; # # CONFIG-eligible
+   $LIMIT=0; # CONFIG-eligible
+   $GREP_REGEX=''; # CONFIG-eligible
+#
+# Internal variable unitialization
+#
+   $USER=$ENV{'USER'};
+   $OUTPUT_BASE='/tmp/'.ucfirst($SCRIPT_NAME).'_'.$USER;
+   $LOG_DIR=$OUTPUT_BASE; # CONFIG-eligible
+   chomp($timestamp=`date +"%y%m%d_%H%M"`);
+   $OUTPUT_DIR="$OUTPUT_BASE/run$timestamp";
+   mkdirs($OUTPUT_DIR);
+#
+# Config file
+#
+   $HOME=$ENV{'HOME'};
+   @CONFIG_LOCATIONS=("$HOME/.config/$SCRIPT_NAME.conf", "$HOME/$SCRIPT_NAME.conf","/etc/$SCRIPT_NAME.conf");
+   for( $i=0; $i<@CONFIG_LOCATIONS; $i++ ){
+     next unless( -f $CONFIG_LOCATIONS[$i] );
+     get_config($CONFIG_LOCATIONS[$i]);
+     last;
+   }
+
+#
+# Initialization for logme
+#
+   @ermessage_db={}; # accumulates messages for each caterory (warning, errors and severe errors)
+   @ercounter=(0,0,0,0);
+   $delim='=' x 80;
+
+#
+# Options
+#
+   getopts("vhc:d:f:g:l:m:p:r:S:u:t:",\%options);
+   if(  exists  $options{'l'}  ){
+      $LOG_DIR=$options{'l'};
+      `mkdir -p -m 770 $LOG_DIR` unless ( -d "$LOG_DIR" );
+   }
+   banner();
+   out("Log directory is $LOG_DIR");
+   if(  exists $options{'h'} ){
+      helpme();
+      exit;
+   }
+
+   if(  exists  $options{'c'}  ){
+      $config_file=$options{'c'};
+      if( -f $config_file && -r $config_file ){
+         get_config($config_file);
+      }else{
+         abend("Config file $config_file does not exists, or does not have read permissions for the user\n\n");
+      }
+   }
+
+   if(  exists  $options{'d'}  ){
+      if( $options{'d'} =~/\d+/  ){
+         $debug=$options{'d'};
+      } else {
+         abend("Debug parameter in option -d should be a number");
+      }
+   }
+
+   if( exists  $options{'f'} ){
+      $FILELIST=$options{'f'};
+   }
+   if( exists  $options{'g'} ){
+      $GREP_REGEX=$options{'g'};
+   }
+   if( exists  $options{'m'} ){
+      $LIMIT=$options{'m'};
+      if(substr($LIMIT,-1,1)=~/[TGMK]/ && substr($LIMIT,0,-1)=~/^\d+$/ ){
+         $LIMIT=convert(substr($LIMIT,0,-1),substr($LIMIT,-1,1));
+      }elsif( $LIMIT !~/^\d+$/ ){
+         logme('E',"The value '$LIMIT' of option -m (transfer limit) is incorrect. Should be integer with possible suffix T,G,G, or K. Ignored");
+      }
+   }
+
+   if(  exists $options{'p'}  ){
+      if(  exists $options{'p'}  ){
+         $THREADS=$options{'p'};
+         if( $THREADS<2 ){
+            logme('E','The value of option p (number of parallel transferes) is incorrect, 3 assumed');
+           $THREADS=3;
+         };
+      }
+   }
+
+   # option P -- specify SSH parameters, including port
+   if(  exists  $options{'S'}  ){
+      $SSH='ssh '.$options{'S'};
+   }
+   if(  exists  $options{'t'}  ){
+      $TARGET_SITE=$options{'t'};
+
+   }
+   if( exists  $options{'r'} ){
+     $RUN_AT=$options{'r'};
+   }
+   if( exists  $options{'u'} ){
+      $TARGET_USER=$options{'u'};
+   }
+   if( exists $options{'v'} ){
+      if ($options{'v'}>=0 && $options{'v'}<=3){
+         logme('V',$options{'v'},$options{'v'});
+      }else{
+         logme('E','The value of option v (number of parallel transferes) is outside the range 0..3. 3 assumed');
+         logme('V',3,3);
+      }
+   }
+
+   if( 0 == $debug ){
+      logme('V',3,3); # set verbosity1 and verbosity2. Verbosity is opposite to severity WEST -> TSEW 0 - T only; 1 - TS; 2 - TSE; 3 - TSEW;
+   }else{
+      logme('V',3,3); # set max verbosity1 and verbosity2.
+   }
+   ( $debug>0 ) && autocommit($SCRIPT_NAME); # sets script name and perform Self-CMS actions.
+
+#
+# Check is script is already running
+#
+   @instances=`pgrep -u $USER  $TARGET_SITE`;
+   if( scalar(@instances)>0 ){
+      die("Script is already running. Only one instance of this utility per user is allowed\n");
+   }
+
+   #chomp($OUTPUT_DIR=`mktemp -d -p $OUTPUT_BASE/$ScriptDir$timestamp.XXXXXXXXX`);
+
+#
+# Process arguments
+#
+   if( scalar(@ARGV)>=1 && $ARGV[0] ){
+      $BASE_DIR=$ARGV[0];
+   }
+   if (scalar(@ARGV)>=2 &&  $ARGV[1] ){
+      $TARGET_DIR=$ARGV[1];
+   }
+   if (scalar(@ARGV)>=3 && $ARGV[2] ){
+      $BASE_DIR.='/'.$ARGV[2]; # add common tail
+      $TARGET_DIR.='/'.$ARGV[2];
+   }
+#
+# Sanity checks
+#
+   abend("Target site is undefined") unless ( defined($TARGET_SITE) );
+   unless( defined($TARGET_USER) ){
+      logme('W','Userid on remote site (Target user) is assumed to the same as current local user $TARGET_USER');
+      $TARGET_USER=$ENV{'USER'};
+   }
+   unless ( -d $BASE_DIR ){
+       abend("Source directory $BASE_DIR does not exists\n");
+   }
+   chdir($BASE_DIR);
+
+   unless ( defined($TARGET_DIR) ){
+       abend("Target directory on remote host is undefined\n");
+   }
+   out("The source directory: $BASE_DIR\nSSH parameters: $SSH");
+   out("Target site: $TARGET_DIR\nTarget directory: $TARGET_DIR\nRemote user ID: $TARGET_USER");
+
+   if( $FILELIST ){
+      if( substr($FILELIST,0,1) eq '/'  ){
+         #absolute name given
+         unless ( -f $FILELIST ){
+            abend("File $FILELIST specified in option -f does not exist\n");
+         }
+      } else {
+         # relative to BASE_DIR name given
+         unless( -f "$BASE_DIR/$FILELIST" ){
+           abend("File $FILELIST specified as relative to $BASE_DIR in option -f does not exist\n");
+        }
+      }
+      out("The filelist used: $FILELIST");
+   }
+
+   $FsizeA_to_be_transfered=0; # calculated in get_list call
+   if(  -f $FILELIST ){
+      get_list('f');
+   } else {
+      get_list('d');
+   }
+#
+# Was the previous transfere completed or there are partial file on the target?
+#
+
+   if( scalar(@FnameA)+scalar(@PartialFileA)==0 ){
+      logme('W',"All files are already transfered. Nothing to do...");
+      exit 0;
+   }
+   logme('W',scalar(@FnameA)." files scheduled for transfer with the total size $FsizeA_to_be_transfered");
+
+#
+# Insertion sorting
+#
+   if (scalar(@FnameA)<100){
+      for( $i=1; $i<@FnameA; $i++ ){
+         next if( $FsizeA[$i-1]>=$FsizeA[$i]);
+         $t=$FsizeA[$i];
+         $t1=$FnameA[$i];
+         for( $j=$i-1; $j>=0 && $FsizeA[$j]<$t; $j-- ){
+            $FsizeA[$j+1]=$FsizeA[$j];
+            $FnameA[$j+1]=$FnameA[$j];
+         }
+         $FsizeA[$j+1]=$t; # move size
+         $FnameA[$j+1]=$t1; # move file name
+      } # for
+   }else{
+      $a=$b=0;
+      for( $i=1; $i<@FnameA; $i++ ){
+        $XsizeH{$FnameA[$i]}=$FsizeA[$i];
+      }
+      @FnameA=sort( mycompare($a,$b), @FnameA); # you can sort the FnameA by size using hash with XsizeH for comparison
+   }
+
+#
+#  Check for limit of transfere and translate the FnameA if it is too big.
+#  Useful for weekend tranmission where you approx know how much you can transfere over the weekend.
+#
+   $total_size=0;
+   for ($i=0; $i<@FnameA; $i++ ){
+      $total_size+=$FsizeA[$i];
+      if( $LIMIT>0 && $total_size>$LIMIT ){
+         @FnameA=splice(@FnameA,$i); # truncate the FnameA
+         logme('W',"Total size is about $LIMIT, FnameA of files truncated at $i");
+         last;
+      } # if
+   } #for
+
+#
+# Calculate the number of piles
+#
+   $number_of_piles=$THREADS-1; #correction as we count pile from 0
+   $average_size_of_pile=$total_size/$THREADS; #each pile
+   $files_to_process=scalar(@FnameA);
+   out('',"Total number of files to process: $files_to_process\n");
+
+   out('Total size: '.humanfs($total_size),' Average pile size: '.humanfs($average_size_of_pile));
+   out("$THREADS threads will be used to transfere the data\n");
+
+#
+# Additing partial files to each heap
+#
+
+   for ($i=0; $i<=$number_of_piles; $i++ ){
+      if( @PartialFileA && $#PartialFileA<=$i ){
+         # we have a partial file to be inserted
+         $PileSizeA[$i]=$PartialDiffA[$i]; # initialize for insertion of incomplete files, which go first
+         $PileA[$i][0]=$PartialFileA[$i]; # add file name of arcially transfered file
+      }else{
+        $PileLastElemA[$i]=$PileSizeA[$i]=0; # pile starts from element zero
+      }
+   }
+
+#
+# MAIN LOOP -- Forming the FnameA of files in each pile
+#
+   $skipped_no=0;
+   $min_pile_index=0;
+   for($fno=0; $fno<=$#FnameA; $fno++ ){
+     if( $FsizeA[$fno]==0 ){
+        logme('S',"The size of file $FnameA[$fno] is zero. File ignored...\n");
+        $fno++;
+        $skipped_no++;
+        next;
+     }
+     # Which pile has minimum size?
+     $min_size=$PileSizeA[$min_pile_index]; # last used pile server as minimum threshold
+     for ($k=0; $k<=$number_of_piles; $k++ ){
+        if( $PileSizeA[$k]<$min_size ){
+            $min_pile_index=$k;
+            $min_size=$PileSizeA[$k];
+        }
+     }
+     # insert file in the proper pile
+     $cur=$PileLastElemA[$min_pile_index]+1;
+     $PileA[$min_pile_index][$cur]=$FnameA[$fno]; # add file name
+     $PileSizeA[$min_pile_index]+=$FsizeA[$fno]; # add file size
+     $PileLastElemA[$min_pile_index]=$cur; # correct index of the last element of the pile
+   } # for
+
+   #
+   # Print piles
+   #
+   out("\n\n===SUMMARY===\n");
+   $total_entries_in_piles=0;
+   $total_in_piles=0;
+   for ($i=0; $i<=$number_of_piles; $i++ ){
+      $total_entries_in_piles+=$PileLastElemA[$i];
+      $total_in_piles+=$PileSizeA[$i];
+      $decode_size_option=humanfs($PileSizeA[$i]);
+      out("\tPile $i has ".$PileLastElemA[$i]." entries and its size is: $decode_size_option\n");
+   }
+   unless(scalar(@FnameA) + scalar(@PartialFileA) == $total_entries_in_piles-$skipped_no ){
+      Logme('S', "Discrepancy exists between sum of missing files and parcial files and total enteires in piles minus skippe files");
+   }
+   out("$total_entries_in_piles files in all piles\n");
+   $decode_size_option=humanfs($total_in_piles);
+   out("Total size of all piles is: $decode_size_option\n");
+   $delta_size=$total_in_piles-$total_size;
+   if( $delta_size !=0  ){
+      logme('S','The original size is '.humanfs($total_size).', while the size of all piles is '.humanfs($total_in_piles),'Delta is '.humanfs($delta_size));
+   }
+
+ #
+ # gen filelists for each concurrent stream
+ #
+
+   for ($i=0; $i<=$number_of_piles; $i++ ){
+       next if( $PileSizeA[$i] == 0 );
+       open SYSOUT,">$OUTPUT_DIR/pile$i";
+       for ($k=0; $k<$PileLastElemA[$i]; $k++ ){
+           next unless (defined($PileA[$i][$k]));
+           print SYSOUT $PileA[$i][$k]."\n";
+       }
+       close SYSOUT;
+   }
+   # At this point we have FnameAgs of files and can send then via tar in parallael using at coomand
+   chdir($BASE_DIR); # just in case
+#
+# Generate scipips from piles
+#
+
+   for ( my $i=0; $i<=$number_of_piles; $i++ ){
+      if( $PileSizeA[$i] == 0 ){
+          out("\nPile $i is empty. Generation skipped:");
+          next;
+      }
+      pile_transfer_gen($i);
+   }
+
+   out("\nOUTPUT DIRECTORY FOR LAUCHING PARRALEL TRANSFERE SCRIPTS IS $OUTPUT_DIR");
+   $launcher="cd $OUTPUT_DIR; for f in sub* ; do at -f $OUTPUT_DIR/\$f now; done";
+   out('Launching script is as following:');
+   out($launcher);
+   open (SYSOUT,'>',"$OUTPUT_BASE/launcher.sh") || logme('S',"Can't open $OUTPUT_BASE/launcher.sh for writing");
+   gen_bash('#!/bin/bash',$launcher);
+   close SYSOUT;
+   `chmod 755 $OUTPUT_BASE/launcher.sh`;
+
+   if( $RUN_AT && $debug==0 ){
+      `at -f $OUTPUT_BASE/launcher.sh $RUN_AT`;
+      out("\n\nCopying threads were launched via command: at -f $OUTPUT_BASE/launcher.sh $RUN_AT\n\n");
+   }else{
+      if( $RUN_AT eq ''){
+         out("\nOption -r (RUN_AT in $SCRIPT_NAME.conf ) was not specified. Launcher was generated but not executed");
+      }
+      out("\nTo schedule the transfer at, for example, 19:05 use the command:\n\t. at -f $OUTPUT_BASE/launcher.sh 19:05");
+   }
+   out("\n\nEnd of program execution\n\n");
+   exit 0;
+#================================== SUBROUTINES ==================================================================
+sub pile_transfer_gen
+{
+my $i=$_[0]; # number of the pile
+   open SYSOUT,">$OUTPUT_DIR/sub$i";
+   $ps=$PileSizeA[$i]/(1024**3);
+   gen_bash('#!/bin/bash','start_time=`date +"%s"`');
+   gen_bash('if [ ! "$1" ] ; then'); # this is for debugging
+   gen_bash("LOG=$OUTPUT_DIR/log$i.txt",'exec 1>>$LOG;\nexec 2>&1');
+   gen_bash('fi');
+   gen_bash("echo Start time in sec \$start_time Pile size $ps G > \$LOG;");
+   gen_bash("PILE_SIZE=$PileSizeA[$i]");
+   gen_bash("cd '$BASE_DIR'");
+   # LEGACY: gen_bash(qq(tar -cv -T "$OUTPUT_DIR/pile$i" | $SSH -l $TARGET_USER  $TARGET_SITE "cd '$TARGET_DIR'; tar xf -")); # no compression;
+
+   @FnameA=`cat $OUTPUT_DIR/pile$i`;
+   for( my $k=0; $k<@FnameA; $k++ ){
+      $apprend_option=( $#PartialFileA<=$i && $k==0 ) ? '--append' : ''; # only the first entry in the pile can requre particl transfer.
+      chomp($f=$FnameA[$k]);
+      if( index($f, '/') >0 ){
+         #files in the subdirectories of the BASE
+         $dir=substr($f,0,rindex($f,'/'));
+         $command=qq(rsync -a --partial $append_option -e '$SSH' '$f' '$TARGET_USER\@$TARGET_SITE:$TARGET_DIR/$dir/');
+      } else {
+         # files int the base directory
+         $command=qq(rsync -a --partial  -e '$SSH' '$f' '$TARGET_USER\@$TARGET_SITE:$TARGET_DIR/');
+      }
+      gen_bash($command);
+      gen_bash(qq(echo $command >> \$LOG));
+   }
+   gen_bash('end_time=`date +"%s"`; (( duration = end_time - start_time ))');
+   gen_bash('echo $end_time Duration $duration >> $LOG');
+   gen_bash('((speed = PILE_SIZE / ( duration * 1024 * 1024 ) )); echo Average speed is $speed MB/sec  >> $LOG');
+   close SYSOUT;
+   #
+   # The command to submit generated script
+   #
+   out("at -f $OUTPUT_DIR/sub$i $RUN_AT\n");
+}
+sub get_config
+{
+my $config_file=$_[0];
+my @conf=`cat $config_file`;
+my ($line,$i);
+   for( $i=1; $i<@conf; $i++ ){
+      chomp($line=$conf[$i]);
+      if( substr($line,0,1) eq '#' ){
+         $conf[$i]='';
+         next;
+      }
+      if( $line=~/^\s*(.*\S)\s*$/ ){
+         $line=$1;
+      }
+      if( $line=~/^(\w+)\s*=\s*['"](.*)['"]/ ){
+         if( $2=~tr/'"// ){
+            die(qq(Wrong value $1 in line $i of config file $config_file -- string parameter can't contain ' or "" within its value.));
+         }
+         $conf[$i]='$'."$1='$2'";
+      }elsif( $line=~/^(\w+\s*=\s*\d+)/ ){
+         $conf[$i]='$'."$1";
+      }else{
+         print "Line $i ($line) in config file $config_file  is not recognizable configuration statement and was skipped\n";
+      }
+   }
+   if( $debug ){
+      print join("\n",@conf),"\n";
+   }
+   for( $i=1; $i<@conf; $i++ ){
+      next unless($conf[$i]);
+      eval($conf[$i]);
+   }
+   return 0;
+} # get_config
+
+#
+# gen bash -- generate line of bash code
+#
+sub gen_bash
+{
+  for ($i=0; $i<@_; $i++) {
+     print SYSOUT $_[$i]."\n";
+  }
+}
+sub mycompare
+{
+my $l=$XsizeH{$_[0]};
+my $r=$XsizeH{$_[1]};
+   return $r <=> $l; # reverse sorting
+}
+#
+# Process filelist: Get files isther from filelist of from whole source directory
+#
+sub get_list
+{
+my $type=$_[0];
+my (@RawFnameA,@target_list, $s, $f, $i, $raw_count);
+
+#
+# Create the directory to which push the files
+#
+   out('');
+   $remote_dir_exist=`$SSH -l $TARGET_USER  $TARGET_SITE "ls -dl '$TARGET_DIR'"`;
+   if ($remote_dir_exist ) {
+      logme('W',"Remote directory $TARGET_DIR exists:\n");
+   } else {
+      `$SSH -l $TARGET_USER  $TARGET_SITE "mkdir -p -m 775 '$TARGET_DIR'; chown $TARGET_USER  '$TARGET_DIR';"`;
+      $remote_dir_exist=`$SSH -l $TARGET_USER  $TARGET_SITE "ls -l '$TARGET_DIR'"` ;
+      if (  $remote_dir_exist ) {
+         logme('W',"Remote directory $TARGET_DIR created\n");
+      } else {
+         abend("USER $TARGET_USER was unable to create the directory  '$TARGET_DIR'");
+
+      }
+   }
+   out('');
+   chdir($BASE_DIR);
+#
+# First get the list of files at the remote host (@target_list). Logic differ between transferring filelist and the directory tree
+#
+   if( $type eq 'f' ){
+      unless ( -f $FILELIST ){
+          abend("File $FILELIST does not exist");
+      }
+   #
+   #  Scan for all directories and add then to the filelist
+   #  Rewrite current filelist  to /tmp  as its content will be changed by expanding each of the directories it contians
+   #
+      open(SYSIN,'<',$FILELIST) || abent("Can't open file $FILELIST for reading");
+      open(SYSOUT,">$OUTPUT_DIR/filelist.txt");
+      while($item=<SYSIN> ){
+         chomp $item;
+         if(  -d $item  ){
+            @RawFnameA=`cd '$BASE_DIR' && find $item -type f -print`;
+            logme('W',"Directory $item with  ".scalar(@RawFnameA)." 'raw' files was included");
+            print SYSOUT @RawFnameA; #  print all the subdir
+         } elsif(  -f $item ){
+            print SYSOUT "$item\n"; # add a single item
+         }
+      }
+      close SYSIN;
+      close SYSOUT;
+      $FILELIST="$OUTPUT_DIR/filelist.txt"; # new merged filelist.
+
+      @target_list=`cat  $FILELIST | tr '\\n' '\\0'  | $SSH -l $TARGET_USER  $TARGET_SITE "cd '$TARGET_DIR' &&  xargs -0 -n 100 stat --printf='%s %n\\n'"`;  # to make find work with file FnameA?
+   } else {
+      @target_list=`$SSH -l $TARGET_USER  $TARGET_SITE "cd '$TARGET_DIR' && find . -type f -print0 | xargs -0 -n 100 stat --printf='%s %n\n'"`;  # FnameA already transfered files on the remote host
+   }
+my $partial=0;
+   if(  $#target_list == -1  ){
+      logme('W',"There are no tranfered files on the target host");
+   } else {
+      # logme('W',scalar(@target_list)." files were already transfered");
+      open(SYSOUT,'>',"$OUTPUT_DIR/_target_directory_status.lst") || abend("Can't write to $OUTPUT_DIR/_target_directory_status.lst ");
+      #
+      # Create AlreadyTransferedA hash
+      #
+      for ($i=0; $i<@target_list; $i++ ){
+        chomp($line=$target_list[$i]);
+        print SYSOUT "$line\n";
+        @F=split(/\s+/,$line,2);
+        $f=$F[-1];
+        if( substr($f,0,2) eq './' ){ $f=substr($f,2); } # remove prefix ./ present in find results
+        $AlreadyTransferedA{$f}=$F[0]; # size.
+      }
+      close SYSOUT;
+
+      `cp -p  $OUTPUT_DIR/_target_directory_status.lst '$BASE_DIR/_target_directory_status$timestamp.lst' 2>/dev/null`;
+      if(  -f "$BASE_DIR/_target_directory_status$timestamp.lst" ){
+         logme('I',"the list of already transfered files is duplicated in $BASE_DIR/_target_directory_status$timestamp.lst");
+      }
+   }
+#
+# read input
+#
+   if( $type eq 'f' ){
+      open(SYSIN, '<', $FILELIST) || abend("Can't open file $FILELIST for reading"); # reread expanded filelist from the new location
+      #
+      # Filter the target FnameA for already completly transmitted files. Switch to transmissionn of partial files if they are found
+      #
+      while($f=<SYSIN> ){
+         chomp $f;
+         next if(substr($f,0,1) eq '_' || index($f,'/_')>-1); # strip files starting with _ (which can be first symbol of /_ combination)
+         $raw_count++;
+         if( substr($f,0,2) eq './' ){ $f=substr($f,2); } # remove prefix ./ present in find results
+         unless ( -f $f ){
+            logme('W',"File $f does not exists. Skipped...");
+         }
+         $s=-s($f);
+         $rc=add_to_list($f,$s);
+         $partial++ if $rc==1;
+      }
+      logme('W',"There are $raw_count files in the filelist $FILELIST");
+      ( $partial ) && logme('I','There are '.$PartialFileA. 'partially transfered files in the target folder');
+   }else{
+      if( $GREP_REGEX ){
+         @RawFnameA=`cd '$BASE_DIR' && find . -type f  | grep -P '$GREP_REGEX' | tr '\\n' '\\0' | xargs -0 stat --printf='%s %n\n'`;
+      }else{
+         @RawFnameA=`cd '$BASE_DIR' && find . -type f -print0 | xargs -0 stat --printf='%s %n\n'`;
+      }
+      logme('W',"There are ".scalar(@RawFnameA)." 'raw' files in source directory");
+
+      #
+      # Loop over RawFnameA
+      #
+      for ($i=0; $i<@RawFnameA; $i++ ){
+         @F=split(/\s+/,$RawFnameA[$i],2);
+         chomp($f=$F[-1]);
+         next if(substr($f,0,1) eq '_' || index($f,'/_')>-1); # strip files starting with /_ (which can be first symbol of /_ combination)
+         $s=$F[0];
+         $rc=add_to_list($f,$s);
+         if ($rc==1) {
+            $partial++;
+            if ($partial%100==0) {
+               logme('I',"The number of partially transfered files reached $partial");
+            }
+         }
+      }
+      ($partial) && logme('I',"There are $partial partially transfered files in the target folder");
+   }
+   if( scalar(@FnameA)>0 ){
+     logme('I','There are '.scalar(@FnameA).' files that need to be transmitted');
+   }
+} # get_list
+#
+
+sub add_to_list
+# Add item to the proper list. Used by get_list.
+# Populated two arrays External variables  @PartialFileA @PartialDiffA
+# use scalar to add after the last element as scalar provides the next index. That's cut number of gloval variables
+{
+my $f=$_[0];
+my $s=$_[1];
+   return 0 if( $s==0);
+   if( substr($f,0,2) eq './' ){ $f=substr($f,2); } # remove prefix ./ present in find results
+   if( exists $AlreadyTransferedA{$f} ){
+      if( $s == $AlreadyTransferedA{$f} ){
+         ($debug) &&  print "[OK] File $f with size".humanfs($s)."was transmitted sucessfully\n";
+         return 0;
+      }else{
+        logme('E',"Partially transmitted file $f detected:\n\tThe original size is ".humanfs($s).' while transmitted size is '. humanfs($AlreadyTransferedA{$f}));
+        $PartialFileA[scalar(@PartialFileA)]=$f;
+        $PartialDiffA[scalar(@PartialDiffA)]=$s-$AlreadyTransferedA{$f}; # can't use scalar(@PartialFileA) as it already increased. Need a varible to do that
+        return 1;
+      }
+   }
+   #
+   # While we did not find file it still can exist is the partially tranmitted state with random suffix created by rsync
+   # We ignore such cases. They should be renamed first with a special utility.
+   ($debug) &&  print "File $f does not exists on remote host\n";
+   $FsizeA[scalar(@FsizeA)]=$s;
+   $FnameA[scalar(@FnameA)]=$f;
+   $FsizeA_to_be_transfered+=$s;
+   return 2;
+}
+
+#
+# Argument (0) refernce to array (0) file name to which to write the content of the array.
+#
+sub write_file
+{
+my $ref=$_[0];
+my $fname=$_[0];
+my $dir;
+   if (index($fname,'/') > -1) {
+      unless ( -d ($dir=substr($fname,0,rindex($fname,'/'))) ){
+        `mkdir -p $dir`;
+      }
+   }
+    open(SYSOUT,'>',"$dir/filelist.txt") || abend(" Can't open file $fname for writing");
+    for (my $i=0; $i<@$ref; $i++ ){
+       next if( $$ref[$i] eq '');
+       print SYSOUT $$ref[$i]."\n";
+    }
+    close SYSOUT;
+}
+sub decode_size_option
+{
+my $s=$_[0];
+   if( $s=~/(\d*\.?\d+){[KMGT]}/ ){
+       $value=$1;
+       if( $2 eq 'K' ){
+         $value*=1024;
+       }elsif( $2 eq 'M' ){
+         $value*=1024**2;
+       }elsif( $2 eq 'G' ){
+         $value*=1024**3;
+       }elsif( $2 eq 'T' ){
+         $value*=1024**4;
+       }
+       return $value;
+   }
+   logme('S',"Size $s is specified incorrectly (allowed suffixes for size are K, M, G, or T");
+   return 0;
+}
+#
+# convert size in bytes into human readable value.
+#
+sub humanfs
+{
+my $s=$_[0];
+   if( $s>(1024**3) ){
+    return sprintf("%.2f G",$s/(1024**3));
+   }
+   if( $s>(1024**2) ){
+    return sprintf("%.2f M",$s/(1024**2));
+   }
+   if( $s>1024 ){
+    return sprintf("%.2f K",$s/1024);
+   }
+   return $s;
+}
+sub convert
+# 1 value
+# 2 Suffix -- T,G,M,K
+{
+my $value=$_[0];
+my $suffix=$_[1];
+
+   if( $suffix eq 'T' ){
+     $value=$value*1_000_000_000_000;
+   }elsif($suffix eq 'G' ){
+     $value=$value*1_000_000_000;
+   }elsif( $suffix eq 'M' ){
+     $value=$value*1_000_000;
+   }elsif($suffix eq 'K' ){
+     $value=$value*1_000;
+   }else{
+     abend("Wrong suffix $suffix in $value$suffix");
+   }
+   return $value;
+}
+#
+### Initialization of some globals plus "poor man CMS"
+#
+sub autocommit
+{
+### Self-CMS
+#
+my $file=$_[0];
+my $GIT_DIR=$ENV{'HOME'}.'/Archive';
+my $script_delta=0;
+   return if $debug==0;
+   mkdir -p $GIT_DIR unless -d $GIT_DIR;
+   if(  -f "$GIT_DIR/$file" ){
+      if( (-s $0) == (-s "$GIT_DIR/$file")   ){
+         $script_delta=`diff $0 $GIT_DIR/$file`;
+      } else {
+         $script_delta='1';
+      }
+      if( length($script_delta)>0 ){
+         chomp($SCRIPT_TIMESTAMP=`date -r $GIT_DIR/$file +"%y%m%d_%H%M"`);
+         `mv $GIT_DIR/$file $GIT_DIR/$file.$SCRIPT_TIMESTAMP`;
+         `cp -p $0 $GIT_DIR/$file`;
+      }  # if
+   } else {
+      `cp -p $0 $GIT_DIR/$file`;
+   }
+} # autocommit
+#
+### logme: Standard SP package diagnostic messages generator
+#
+sub logme
+{
+#
+# Parameters
+#
+my ($package, $filename, $lineno) = caller;
+my $message=$_[1];
+   chomp($message); # we will add \n ourselves
+#
+# special cases -- "negative lineno" are special cases
+#      D means setup. We set two parameters msglevel1 and msglevel2,
+#      X Summary
+#
+
+   if( $_[0] eq 'V' ){
+      # set verbosity
+      $msg_cutlevel1=length("WEST")-$_[1]-1;
+      $msg_cutlevel2=length("WEST")-$_[2]-1;
+      return;
+   }elsif( $_[0] eq 'X' ){
+   my $summary;
+   my $i;
+   my $delta_chunks;
+      #
+      # We will put the most severe errors at the end and make 15 sec pause before  read them
+      #
+      for( $i=0; $i<=length('WEST'); $i++ ){
+         next unless( $ercounter[$i] );
+         $summary.=" ".substr('WEST',$i,1).": ".$ercounter[$i];
+      } # for
+      out("\n\n=== MESSAGES SUMMARY $summary ===\n");
+      if( $ercounter[1] + $ercounter[2] ){
+         out("$ermessage_db[1]\n") if $ercounter[1]>0;
+         out("$ermessage_db[2]\n") if $ercounter[2]>0;
+      }
+      return;
+   } #if
+#
+# Now let's process "normal message, which should have WEST severity code.
+#
+my $ercode=uc(substr($_[0],0,1));
+# my $ersuffix=(length($_[0])>1) ? substr($_[0],1,1):'';
+
+
+#
+# From diagnostic message from error code, line number and message (optionally timestamp is suffic of error code is T)
+#
+     $message="$SCRIPT_NAME\-$lineno$ercode: $message";
+my   $severity=index("WEST",$ercode);
+     if ($severity==-1) {
+         out($message); # informational messages
+         return;
+     }
+     $ercounter[$severity]++; # Increase messages counter  for given severity (supressed messages are counted too)
+     return if(  $severity<$msg_cutlevel1 && $severity<$msg_cutlevel2 ); # no need to process if this is lower then both msglevels
+
+#----------------- Error history -------------------------
+      if(  $severity > 0 ){
+         # Warnings, Errors and Severe Errors should be stored so that later then can be displayed in summary.
+         $ermessage_db[$severity] .= "\n\n$message";
+      }
+#--------- Message printing and logging --------------
+      # special codes has $verify ==-1; We treat separatly verbosity for log and console.
+      if( $severity>-1 ){
+         #one of 4 legit codes W,E,S and T
+            if( $severity >= $msg_cutlevel2 ){
+               # $msg_cutlevel2 defines writing to SYSLOG. 3 means Errors (Severe and terminal messages always whould be printed)
+               if( $severity<4 ){
+                  print SYSLOG "$message\n";
+               }else{
+                  # special treatment of serious messages
+                  print SYSLOG "$delim\n$message\n$delim\n";
+               }
+            }
+            if( $severity >= $msg_cutlevel1 ){
+               # $msg_cutlevel1 defines writing to STDIN. 3 means Errors (Severe and terminal messages always whould be printed)
+               if( $severity<3 ){
+                  print "$message\n";
+               } else {
+                  print "$delim\n$message\n$delim\n";
+                  sleep 3;
+               }
+            }
+            return;
+      } # processing of legit codes
+
+} # logme
+#
+### sub out: direct output of lines suppled as parameters
+# Unlike logme it can accept multipile lines. Use out('') for spaceline.
+sub out
+{
+my $i;
+   print "$_[0]\n";
+   print SYSLOG "$_[0]\n";
+   if( scalar(@_)>1 ){
+      for ($i=1; $i<@_; $i++ ){
+         print "$_[$i]\n";
+         print SYSLOG "$_[$i]\n";
+      }
+   }
+} # out
+#
+### sub abend: print dignistic, close syslog and terminate the script
+#
+sub abend
+{
+my $message;
+my ($package, $filename, $lineno) = caller;
+   $message="$lineno $_[1]. Exiting ";
+   out($message);
+   #  Syslog might not be availble
+   die("Abend at $lineno. $message");
+} # abend
+#
+### sub banner:  open log file and print inital line for the script
+#
+sub banner {
+my $today=`date "+%y/%m/%d %H:%M"`;
+   chomp($today);
+   mkdir($LOG_DIR);
+my $logstamp=`date +"%y%m%d_%H%M"`;
+   chomp $logstamp;
+   $LOG_FILE=$LOG_DIR.'/'.$USER.$logstamp.'.log';
+   open (SYSLOG, ">$LOG_FILE") or die("Permissions for log directory $LOG_DIR does not allow to write to it by user $USER. Fatal error...");
+   $SCRIPT_MOD_DATE=`date -r $0 +"%y%m%d_%H%M"`; chomp $SCRIPT_MOD_DATE;
+my $title="\n\n=== $SCRIPT_NAME: $VERSION $SCRIPT_MOD_DATE. DEBUG=$debug , Start at $today ===";
+   out($title);
+} # banner
+#
+# sub mkdirs: create direftories using option -p
+#
+sub mkdirs
+{
+   foreach( @_ ){
+      next if(  -d $_);
+      system("mkdir -p $_");
+      abend("Can't create directory $_") unless ( -d $_ );
+   }
+}
+sub helpme
+{
+   while(<DATA>) {
+    print "\t$_";
+   } # while
+   exit;
+}
+sub getopts
+{
+my ($options_def,$options_hash)=@_;
+my ($first,$rest,$pos,$cur_opt);
+   while(@ARGV){
+      $cur_opt=$ARGV[0];
+      last if( substr($cur_opt,0,1) ne '-' );
+      if ($cur_opt eq '--'){
+          shift @ARGV;
+          last;
+      }
+      $first=substr($cur_opt,1,1);
+      $pos = index($options_def,$first);
+      if( $pos==-1) {
+         warn("Undefined option -$first skipped without processing\n");
+         shift(@ARGV);
+         next;
+      }
+      $rest=substr($cur_opt,2);
+      if( $pos<length($options_def)-1 && substr($options_def,$pos+1,1) eq ':' ){
+         # option with parameters
+         if( $rest eq ''){
+           shift(@ARGV); # get the value of option
+           unless( @ARGV ){
+              warn("End of line reached for option -$first which requires argument\n");
+              $$options_hash{$first}='';
+              last;
+           }
+           if ( $ARGV[0] =~/^-/ ) {
+               warn("Option -$first requires argument\n");
+               $$options_hash{$first} = '';
+           }else{
+               $$options_hash{$first}=$ARGV[0];
+               shift(@ARGV); # get next chunk
+           }
+         } else {
+            #value is concatenated with option like -ddd
+            if( ($first x length($rest)) eq $rest ){
+               $$options_hash{$first} = length($rest)+1;
+            }else{
+               $$options_hash{$first}=$rest;
+            }
+            shift(@ARGV);
+         }
+      }else {
+         $$options_hash{$first} = 1; # set the option
+         if ($rest eq '') {
+            shift(@ARGV);
+         } else {
+            $ARGV[0] = "-$rest"; # there can be other options without arguments after the first
+         }
+      }
+   }
+}
+__DATA__
+Nikolai Bezroukov, 2018-2020. Licensed under Artistic license
+
+msync organizes files into given number of "piles" and transfers all piles in parallel using for each separate invocation of rsync the target server.
+
+Can be used for transferring large file such as genomes files to/from AWS and for finishing botched transfers of huge files,
+started using scp or tar.
+
+It detects and automatically restarts the transmission of partially transferred files but only if the file name of partially transferred
+file is the same as the original (this will not be the case if you use rsync and the target server was rebooted; in this case you need to rename filemanullay)
+
+While this restart option is handy, it is still it is recommended to split files over 5TB into chunks for transfer.
+
+The number of parallel processed launched is specified via option -p (the default is 4).
+
+
+
+INVOCATION
+
+ATTENTION: both parameters are obligatory and can't be omitted unless they are specified in config file
+
+Like most copy utilities, this utility has two parameters (source dir and target dir). Both are obligatory and can't be omitted unless
+they are specified in the config file
+
+1st (BASE_DIR) -- the name of BASE directory, the name of BASE directory: the root of the  tree from  which files are transferred.
+                  If option -f is given abs path for all entries in the list that do not stat
+                   with '/'  will be prefixed this value (see below).
+                  If option -f is not given the utility transfers all files in this tree, unless grep regular expression
+                  is specified via option -g. In the latter case only subset filtered by this this regex is transferred
+
+2nd  (TARGET_DIR) -- name of the target directory on target server where files need to be copied to.
+
+There are two ways to invoke this utility:
+
+1. By specifying absolute path to BASE directory on the source and target. All files in this directory will be transferred although it might need multiple invocations.
+   msync BASE_DIR BASE_DIR
+
+For example:
+
+   msync -u backup -t 10.1.1.1 /doolittle/Projects/Critical/Genome033/ /gpfs/backup/data/bioinformatics/Critical/Genome033
+
+2. Specifying selected list of files and directories either with abs path or relative to BASE directory. Only they will be transferred.
+This is subset should be stored one entry per line in the file provided in option -f.
+
+For example:
+
+   msync -t 10.1.1.1 -f critical.lst /doolittle/Projects/Critical/Genome033/ /gpfs/backup/data/bioinformatics/Critical/Genome033
+
+NOTE:
+
+if invoked with three parameters the third parameter is interpreted as the common tail and added to both BASE_DIRECTORY_SOURCE and BASE_DIRECTORY_ON_TARGET
+
+ msync BASE_DIRECTORY TARGET_DIRECTORY SUBDIRECTORY
+
+That means that the previous example can be rewritten as
+
+  msync -u backup -t 10.1.1.1 -f critical.lst /doolittle/Projects /gpfs/nobackup/data/bioinformatics Critical/Genome033
+
+OPTIONS
+
+-c -- absolute or relative path to the configuration file. Default is the first in the following list:
+      ~/.config/msync.conf, ~/msync.conf, /etc/msync.conf
+-f -- filelist. Either absolute pathname should be specified, or the file should be in BASE directory.  Each line can specify either
+      a file with path or a directory (in the latter case all files in this subtree will be transferred).
+      Files with relative path are considered to based on the BASE DIRECTORY (the first parameter of the invocation) to the target.
+-h -- help
+-g -- egrep regular expression for selecting files and directories (works only in tree copy mode, ignored if -f is specified)
+-l -- directory for log files (the default is /tmp/Msync_<userid> )
+-m -- max amount to be transferred (useful for weekend transfers). Can be specified in T,G,M or K. For example -m 4T
+-p --  (level of parallelism) number of parallel streams (default is 4);
+-r -- RUN AT specified time. Specified time is passed to at command (so now is acceptable.)
+      If this option is specified it is passed to at command which launches the set of parallel transfer scripts
+      (as many as specified in option -p)  generated by this utility. For example as -r now  or -r 19:30
+      If option -r is not specified, then the launcher script is generated but not executed.
+      The command for launching  them (launcher.sh ) is very simple and is listed in the protocol.
+      You can schedule the msync utility via cron can be invoked at 7PM each day and use limit of transferred file
+      (see option -m above) to finish it in the morning.  The same trick can work to transfers sceduled for weekends.
+-S -- list of ssh parameters which is passed to SSH and RSYNC "as is" (for example -S '-i /home/bezroun/.ssh/id_rsa.tt -P 2222';
+-t -- target site IP or DNS name (should be configured with the passwordless SSH login from the source site)
+-u -- user name on target site if different from the USER env variable (should be configured with the passwordless SSH login from
+      the source site)
+-v -- verbosity (0-3). 0 -- no messages; 1 -- only serious; 2 - serious and errors; 3 -- serious, errors and warnings;  Default 3
+-h -- help
+-d -- debug flag (0 -production mode; 1-3 -various debugging modes with additional debugging output). if debug is greater then zero,
+      the source is saved in archive ~/Archive, if it was changed form the prev run.
+
+NOTES
+
+Acceleration depends on the number of processes that will be launched in parallel.
+While default is 4, the number up to 8 usually work faster on links with latency 100 msec.
+Further increase to 16 leads to eventual saturation of the line.
+
+You need to experiment to find the optimal number for your situation. For some reason on large files rsync works better than tar,
+even if they do not exist of the target.
+
+If the utility is started in debug mode it compares its body with the last version in archive and if it changed, updates the archive preserving prev generation
+The archive directory is $HOME/Archive. Again, this happens only if debug variable is set to non zero via option -d or config file.
+
+This directory should be different from the directory, from which script is launched
+
+Split option is not implemented. Currently it can't split huge files and reassemble then automatically on the target server.
+In the future versions option -b specified chunk size might be implemented. Right now I do not feel that it is necessary although
+I did encountered situation in which some large files need to be split for storage.
+
+One advantage of option -b would be that if the number of threads equal 8
+and the file we need to transfer is 40TB will be split into exactly 8 chunks.
+
+   split --bytes 5T --numeric-suffixes --suffix-length=3 foo /tmp/foo.
+
+The split commands generate chunks named: foo.000, foo.001 ...
+
+For proper re-assembling you need to sort the  chunks first
+
+   cd $TARGET && cat `ls foo.* | sort` > foo
+

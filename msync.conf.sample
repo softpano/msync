@@ -1,0 +1,22 @@
+# config file for msync
+
+# Corresponds to the first parameter
+#BASE_DIR='/Workspace/Projects/Critical'
+
+# Corresponds to the second parameter
+#TARGET_DIR='/Backup/Legacy/Projects/Critical'
+
+# Corresponds to the option -f
+#FILELIST='compressed_bz2.lst'
+
+# Corresponds to option -p (number of parallel processes used).
+#THREADS=4
+
+# Corresponds to option -t
+#TARGET_SITE='my.targetdomain.net'
+
+# Corresponds to option -u
+#TARGET_USER='joeadmin'
+
+# Corresponds to option -S (ssh options passed to ssh and rsync)
+#SSH_OPTIONS='-i /home/joeadmin/.ssh/id_rsa.external'
